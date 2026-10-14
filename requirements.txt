@@ -1,0 +1,8 @@
+# MetaTrader 5 Python package is Windows-native (required on Windows / Windows VPS)
+MetaTrader5>=5.0.45; sys_platform == 'win32'
+
+# Core Dependencies
+python-dotenv>=1.0.0
+pandas>=2.0.0
+numpy>=1.24.0
+pyarrow>=14.0.0

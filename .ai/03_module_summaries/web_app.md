@@ -4,8 +4,14 @@
 Cung cấp giao diện Trading Terminal chuyên nghiệp dành cho bot giao dịch thuật toán:
 - Biểu đồ nến TradingView tương tác ở trung tâm.
 - Hiển thị trực tiếp tổng số dư ví được quy đổi ra **VNĐ** (theo tỷ giá USD/VND hiện hành).
-- Form đặt lệnh trực quan cho phép nhập: **mức giá muốn đánh**, **số lot**, và **mức giá mong muốn kiếm được** kèm tính toán lợi nhuận dự kiến tức thời (cả USD và VNĐ).
-- Cột bên cạnh biểu đồ hiển thị danh sách **lịch sử các lệnh AI đã đánh** (ticket, loại lệnh BUY/SELL, volume, điểm vào, điểm chốt lời, lãi lỗ USD và VNĐ).
+- Form đặt lệnh trực tiếp bằng **VNĐ**:
+  - **Mức giá muốn đánh (VNĐ)**: e.g. `27,613 ₫` (tự động đồng bộ với tỷ giá Forex `1.08500`).
+  - **Số lot**: Khối lượng vào lệnh.
+  - **Mức giá mong muốn kiếm được (VNĐ)**: e.g. `27,715 ₫` (chốt lời mục tiêu `1.08900`).
+  - Hộp tính toán lợi nhuận dự kiến tức thì bằng cả **VNĐ** và **USD**.
+- Cột bên cạnh biểu đồ hiển thị danh sách **lịch sử các lệnh AI thật đã đánh**:
+  - Không sử dụng dữ liệu mẫu (seed data đã được gỡ bỏ hoàn toàn).
+  - Chỉ ghi nhận và hiển thị các lệnh thực tế do người dùng hoặc bot đặt.
 
 ## 2. API Endpoints
 - `GET /`: Giao diện Dashboard SPA hoàn chỉnh.

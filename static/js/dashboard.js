@@ -1,4 +1,4 @@
-// AI Earning Trading Terminal - Frontend Logic
+// AI Earning Trading Terminal - Dashboard Logic
 let mainChart = null;
 let candleSeries = null;
 let volumeSeries = null;
@@ -11,29 +11,33 @@ let rsiSeries = null;
 let currentSymbol = "EURUSD";
 let currentTimeframe = "M5";
 let lastCandleData = [];
+let latestMarketPrice = 1.08500;
+let allOrders = [];
+let currentOrderFilter = "ALL";
+let usdToVndRate = 25450;
 
 document.addEventListener("DOMContentLoaded", () => {
   initCharts();
+  initOrderForm();
   initTabs();
   initControls();
   loadAllData();
 
-  // Auto refresh live data every 10 seconds
+  // Auto-refresh interval
   setInterval(() => {
     loadAccountData();
-    loadTablesData();
-  }, 10000);
+    loadOrdersSidebar();
+  }, 8000);
 });
 
-// 1. Initialize TradingView Charts
+// 1. Initialize TradingView Lightweight Charts
 function initCharts() {
   const chartContainer = document.getElementById("chart-container");
   const rsiContainer = document.getElementById("rsi-container");
 
-  // Chart configuration
   const chartOptions = {
     layout: {
-      background: { color: "#0a0d14" },
+      background: { color: "#090d16" },
       textColor: "#94a3b8",
       fontSize: 12,
       fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif',
@@ -66,10 +70,9 @@ function initCharts() {
     },
   };
 
-  // Create Main Chart
+  // Main Candlestick Chart
   mainChart = LightweightCharts.createChart(chartContainer, chartOptions);
 
-  // Candlestick Series
   candleSeries = mainChart.addCandlestickSeries({
     upColor: "#10b981",
     downColor: "#f43f5e",
@@ -79,31 +82,25 @@ function initCharts() {
     wickDownColor: "#f43f5e",
   });
 
-  // Volume Series
   volumeSeries = mainChart.addHistogramSeries({
     priceFormat: { type: "volume" },
     priceScaleId: "",
-    scaleMargins: {
-      top: 0.8,
-      bottom: 0,
-    },
+    scaleMargins: { top: 0.8, bottom: 0 },
   });
 
-  // SMA 20 Series
   sma20Series = mainChart.addLineSeries({
     color: "#06b6d4",
     lineWidth: 1.5,
     title: "SMA 20",
   });
 
-  // SMA 50 Series
   sma50Series = mainChart.addLineSeries({
     color: "#f59e0b",
     lineWidth: 1.5,
     title: "SMA 50",
   });
 
-  // Create RSI Sub-Chart
+  // RSI Sub-chart
   const rsiOptions = {
     ...chartOptions,
     rightPriceScale: {
@@ -119,14 +116,13 @@ function initCharts() {
     title: "RSI 14",
   });
 
-  // RSI Overbought (70) and Oversold (30) lines
   rsiSeries.createPriceLine({
     price: 70,
     color: "rgba(244, 63, 94, 0.6)",
     lineWidth: 1,
     lineStyle: LightweightCharts.LineStyle.Dashed,
     axisLabelVisible: true,
-    title: "Overbought (70)",
+    title: "70",
   });
   rsiSeries.createPriceLine({
     price: 30,
@@ -134,7 +130,7 @@ function initCharts() {
     lineWidth: 1,
     lineStyle: LightweightCharts.LineStyle.Dashed,
     axisLabelVisible: true,
-    title: "Oversold (30)",
+    title: "30",
   });
 
   // Synchronize time scales
@@ -145,7 +141,7 @@ function initCharts() {
     if (range) mainChart.timeScale().setVisibleLogicalRange(range);
   });
 
-  // Crosshair Legend update
+  // Crosshair Legend
   mainChart.subscribeCrosshairMove(param => {
     if (!param || !param.time || !param.seriesData.get(candleSeries)) {
       updateLegendWithLastCandle();
@@ -156,7 +152,6 @@ function initCharts() {
     displayCandleLegend(candle, vol ? vol.value : 0, param.time);
   });
 
-  // Handle Window Resize
   window.addEventListener("resize", () => {
     mainChart.applyOptions({ width: chartContainer.clientWidth });
     rsiChart.applyOptions({ width: rsiContainer.clientWidth });
@@ -194,12 +189,13 @@ function updateLegendWithLastCandle() {
   displayCandleLegend(last, 0, last.time);
 }
 
-// 2. Fetch and Load All Data
+// 2. Fetch Data
 async function loadAllData() {
   await Promise.all([
     loadAccountData(),
     loadCandleData(),
-    loadTablesData()
+    loadOrdersSidebar(),
+    loadSecondaryTables()
   ]);
 }
 
@@ -207,6 +203,10 @@ async function loadAccountData() {
   try {
     const res = await fetch("/api/account");
     const data = await res.json();
+
+    if (data.usd_vnd_rate) {
+      usdToVndRate = data.usd_vnd_rate;
+    }
 
     const badge = document.getElementById("connection-badge");
     const badgeText = document.getElementById("connection-text");
@@ -219,25 +219,28 @@ async function loadAccountData() {
       badgeText.innerText = `MT5 Đã kết nối • ${data.server} (#${data.login})`;
     }
 
-    document.getElementById("account-currency").innerText = data.currency;
-    document.getElementById("val-balance").innerText = `$${Number(data.balance).toLocaleString("en-US", { minimumFractionDigits: 2 })}`;
-    document.getElementById("val-equity").innerText = `$${Number(data.equity).toLocaleString("en-US", { minimumFractionDigits: 2 })}`;
+    // Hiển thị số dư trong ví dạng VNĐ (Dưới chart)
+    const balVnd = Number(data.balance_vnd || (data.balance * usdToVndRate));
+    document.getElementById("wallet-balance-vnd").innerText = `${balVnd.toLocaleString("vi-VN")} ₫`;
+    document.getElementById("wallet-balance-usd").innerText = `$${Number(data.balance).toLocaleString("en-US", { minimumFractionDigits: 2 })}`;
 
-    const flPnl = Number(data.floating_pnl);
-    const flBadge = document.getElementById("floating-badge");
-    flBadge.innerText = `${flPnl >= 0 ? "+" : ""}$${flPnl.toFixed(2)}`;
-    flBadge.className = `badge ${flPnl >= 0 ? "badge-buy" : "badge-sell"}`;
-    document.getElementById("floating-desc").innerText = `PnL thả nổi: ${flPnl >= 0 ? "+" : ""}$${flPnl.toFixed(2)}`;
+    const eqVnd = Number(data.equity_vnd || (data.equity * usdToVndRate));
+    document.getElementById("wallet-equity-vnd").innerText = `${eqVnd.toLocaleString("vi-VN")} ₫`;
+    document.getElementById("wallet-equity-usd").innerText = `$${Number(data.equity).toLocaleString("en-US", { minimumFractionDigits: 2 })}`;
 
-    document.getElementById("val-winrate").innerText = `${data.win_rate}%`;
-    document.getElementById("val-trades-count").innerText = `Tổng ${data.closed_trades} lệnh đã đóng`;
+    const flVnd = Number(data.floating_pnl_vnd || (data.floating_pnl * usdToVndRate));
+    const flVndEl = document.getElementById("wallet-floating-vnd");
+    flVndEl.innerText = `${flVnd >= 0 ? "+" : ""}${flVnd.toLocaleString("vi-VN")} ₫`;
+    flVndEl.style.color = flVnd >= 0 ? "var(--color-green)" : "var(--color-red)";
 
-    const realizedProfit = Number(data.total_profit);
-    const realizedEl = document.getElementById("val-realized-profit");
-    realizedEl.innerText = `${realizedProfit >= 0 ? "+" : ""}$${realizedProfit.toFixed(2)}`;
-    realizedEl.className = `metric-value ${realizedProfit >= 0 ? "text-green" : "text-red"}`;
+    document.getElementById("wallet-leverage").innerText = `1:${data.leverage}`;
+    document.getElementById("wallet-winrate").innerText = `${data.win_rate}%`;
 
-    document.getElementById("val-leverage").innerText = `Đòn bẩy: 1:${data.leverage}`;
+    const realizedVnd = Number(data.total_profit_vnd || (data.total_profit * usdToVndRate));
+    const realizedEl = document.getElementById("wallet-realized-vnd");
+    realizedEl.innerText = `${realizedVnd >= 0 ? "+" : ""}${realizedVnd.toLocaleString("vi-VN")} ₫`;
+    realizedEl.style.color = realizedVnd >= 0 ? "var(--color-gold)" : "var(--color-red)";
+
   } catch (err) {
     console.error("Lỗi tải thông tin tài khoản:", err);
   }
@@ -260,15 +263,281 @@ async function loadCandleData() {
     mainChart.timeScale().fitContent();
     rsiChart.timeScale().fitContent();
 
+    latestMarketPrice = data.latest_price || data.candles[data.candles.length - 1].close;
+
+    // Cập nhật giá mẫu vào ô nhập lệnh nếu người dùng chưa sửa
+    const entryInput = document.getElementById("input-entry-price");
+    if (!entryInput.dataset.modified) {
+      entryInput.value = latestMarketPrice.toFixed(5);
+      recalcEstimatedProfit();
+    }
+
     updateLegendWithLastCandle();
   } catch (err) {
     console.error("Lỗi tải nến Parquet:", err);
   }
 }
 
-async function loadTablesData() {
+// 3. Lịch Sử Các Lệnh AI Đã Đánh (Bên Cạnh Chart)
+async function loadOrdersSidebar() {
+  try {
+    const res = await fetch("/api/orders");
+    allOrders = await res.json();
+    renderOrdersFeed();
+  } catch (err) {
+    console.error("Lỗi tải danh sách lệnh AI:", err);
+  }
+}
+
+function renderOrdersFeed() {
+  const feed = document.getElementById("orders-feed");
+  document.getElementById("sidebar-order-count").innerText = allOrders.length;
+
+  let filtered = allOrders;
+  if (currentOrderFilter === "OPEN") {
+    filtered = allOrders.filter(o => o.status === "OPEN");
+  } else if (currentOrderFilter === "CLOSED") {
+    filtered = allOrders.filter(o => o.status === "CLOSED");
+  }
+
+  if (filtered.length === 0) {
+    feed.innerHTML = `<div style="text-align: center; color: var(--text-muted); padding: 30px;">Không có lệnh nào</div>`;
+    return;
+  }
+
+  feed.innerHTML = filtered.map(o => {
+    const isBuy = o.order_type === "BUY";
+    const isOpen = o.status === "OPEN";
+    const pnlUsd = Number(o.profit_usd || o.profit || 0);
+    const pnlVnd = Number(o.profit_vnd || (pnlUsd * usdToVndRate));
+    const isWin = pnlUsd > 0;
+
+    let cardClass = "order-item-card";
+    if (isOpen) cardClass += " is-open";
+    else if (isWin) cardClass += " is-win";
+    else cardClass += " is-loss";
+
+    return `
+      <div class="${cardClass}">
+        <div class="order-item-header">
+          <span class="order-ticket">#${o.ticket_id} • <strong>${o.symbol}</strong></span>
+          <span class="order-type-badge ${isBuy ? 'badge-buy' : 'badge-sell'}">
+            ${isBuy ? 'BUY' : 'SELL'} ${o.lot_size.toFixed(2)} lot
+          </span>
+        </div>
+
+        <div class="order-details-grid">
+          <div class="order-detail-field">Giá vào: <span>${o.open_price.toFixed(5)}</span></div>
+          <div class="order-detail-field">Giá mục tiêu: <span>${o.take_profit ? o.take_profit.toFixed(5) : '--'}</span></div>
+          <div class="order-detail-field">Giá chốt: <span>${o.close_price ? o.close_price.toFixed(5) : 'Đang chạy'}</span></div>
+          <div class="order-detail-field">Thời gian: <span>${o.open_time.split(" ")[1] || o.open_time}</span></div>
+        </div>
+
+        <div class="order-pnl-row">
+          <div>
+            <div class="order-pnl-usd ${pnlUsd >= 0 ? 'text-green' : 'text-red'}">
+              ${pnlUsd >= 0 ? '+' : ''}$${pnlUsd.toFixed(2)}
+            </div>
+            <div class="order-pnl-vnd">
+              ${pnlVnd >= 0 ? '+' : ''}${pnlVnd.toLocaleString("vi-VN")} ₫
+            </div>
+          </div>
+          <div>
+            ${isOpen ? `
+              <button class="btn-close-order" onclick="handleCloseOrder(${o.ticket_id})">
+                Chốt lệnh
+              </button>
+            ` : `
+              <span class="badge badge-hold">${o.close_reason || 'CLOSED'}</span>
+            `}
+          </div>
+        </div>
+      </div>
+    `;
+  }).join("");
+}
+
+window.handleCloseOrder = async function(ticketId) {
+  try {
+    const res = await fetch(`/api/orders/close/${ticketId}`, { method: "POST" });
+    const data = await res.json();
+    if (data.success) {
+      showToast(`✓ Đã chốt lệnh #${ticketId} thành công (+${data.profit.toFixed(2)} USD)`);
+      loadAccountData();
+      loadOrdersSidebar();
+    }
+  } catch (err) {
+    showToast(`❌ Lỗi chốt lệnh: ${err.message}`);
+  }
+};
+
+// 4. Order Input & Profit Calculation Logic
+function initOrderForm() {
+  const entryInput = document.getElementById("input-entry-price");
+  const lotInput = document.getElementById("input-lot-size");
+  const targetInput = document.getElementById("input-target-price");
+
+  // Track modification
+  entryInput.addEventListener("input", () => {
+    entryInput.dataset.modified = "true";
+    recalcEstimatedProfit();
+  });
+  lotInput.addEventListener("input", recalcEstimatedProfit);
+  targetInput.addEventListener("input", recalcEstimatedProfit);
+
+  // Quick fill current price
+  document.getElementById("btn-fill-current-price").addEventListener("click", () => {
+    entryInput.value = latestMarketPrice.toFixed(5);
+    recalcEstimatedProfit();
+    showToast(`Đã lấy giá thị trường hiện tại: ${latestMarketPrice.toFixed(5)}`);
+  });
+
+  // Lot quick chips
+  const lotChips = document.querySelectorAll(".lot-chip");
+  lotChips.forEach(chip => {
+    chip.addEventListener("click", () => {
+      lotChips.forEach(c => c.classList.remove("active"));
+      chip.classList.add("active");
+      lotInput.value = chip.dataset.lot;
+      recalcEstimatedProfit();
+    });
+  });
+
+  // Order submission
+  document.getElementById("btn-submit-buy").addEventListener("click", () => executeOrder("BUY"));
+  document.getElementById("btn-submit-sell").addEventListener("click", () => executeOrder("SELL"));
+
+  // Initial calculation
+  recalcEstimatedProfit();
+}
+
+function recalcEstimatedProfit() {
+  const entry = parseFloat(document.getElementById("input-entry-price").value) || 0;
+  const lot = parseFloat(document.getElementById("input-lot-size").value) || 0;
+  const target = parseFloat(document.getElementById("input-target-price").value) || 0;
+
+  if (entry <= 0 || target <= 0 || lot <= 0) {
+    document.getElementById("calc-pips-dist").innerText = "0 pips";
+    document.getElementById("calc-profit-usd").innerText = "$0.00";
+    document.getElementById("calc-profit-vnd").innerText = "0 ₫";
+    return;
+  }
+
+  const diff = Math.abs(target - entry);
+  const pips = diff * 10000;
+  // EURUSD 1 lot = $10 per pip
+  const profitUsd = pips * lot * 10;
+  const profitVnd = profitUsd * usdToVndRate;
+
+  document.getElementById("calc-pips-dist").innerText = `Mục tiêu: +${pips.toFixed(1)} pips`;
+  document.getElementById("calc-profit-usd").innerText = `+$${profitUsd.toFixed(2)}`;
+  document.getElementById("calc-profit-vnd").innerText = `+${Math.round(profitVnd).toLocaleString("vi-VN")} ₫`;
+}
+
+async function executeOrder(orderType) {
+  const entry = parseFloat(document.getElementById("input-entry-price").value);
+  const lot = parseFloat(document.getElementById("input-lot-size").value);
+  const target = parseFloat(document.getElementById("input-target-price").value);
+
+  if (!entry || !lot || !target) {
+    showToast("Vui lòng điền đầy đủ mức giá vào, số lot và mức giá mục tiêu");
+    return;
+  }
+
+  try {
+    const res = await fetch("/api/orders/place", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        symbol: currentSymbol,
+        order_type: orderType,
+        lot_size: lot,
+        entry_price: entry,
+        target_price: target
+      })
+    });
+
+    const data = await res.json();
+    if (res.ok && data.success) {
+      showToast(`✓ AI đã khớp lệnh ${orderType} ${lot} lot ${currentSymbol} (#${data.ticket_id})`);
+      loadAccountData();
+      loadOrdersSidebar();
+      loadSecondaryTables();
+    } else {
+      showToast(`❌ ${data.detail || "Không thể đặt lệnh"}`);
+    }
+  } catch (err) {
+    showToast(`❌ Lỗi kết nối: ${err.message}`);
+  }
+}
+
+// 5. Sidebar Filter and Secondary Tabs
+function initControls() {
+  document.getElementById("btn-refresh").addEventListener("click", () => {
+    loadAllData();
+    showToast("Đã làm mới dữ liệu toàn hệ thống");
+  });
+
+  // Timeframe buttons
+  const tfBtns = document.querySelectorAll(".tf-btn");
+  tfBtns.forEach(btn => {
+    btn.addEventListener("click", () => {
+      tfBtns.forEach(b => b.classList.remove("active"));
+      btn.classList.add("active");
+      currentTimeframe = btn.dataset.tf;
+      document.getElementById("active-tf").innerText = currentTimeframe;
+      loadCandleData();
+    });
+  });
+
+  // Indicator Toggles
+  document.getElementById("toggle-sma20").addEventListener("change", (e) => {
+    sma20Series.applyOptions({ visible: e.target.checked });
+  });
+
+  document.getElementById("toggle-sma50").addEventListener("change", (e) => {
+    sma50Series.applyOptions({ visible: e.target.checked });
+  });
+
+  document.getElementById("toggle-vol").addEventListener("change", (e) => {
+    volumeSeries.applyOptions({ visible: e.target.checked });
+  });
+
+  document.getElementById("toggle-rsi").addEventListener("change", (e) => {
+    const rsiCont = document.getElementById("rsi-container");
+    rsiCont.style.display = e.target.checked ? "block" : "none";
+  });
+
+  // Sidebar Filter buttons
+  const filterBtns = document.querySelectorAll(".filter-btn");
+  filterBtns.forEach(btn => {
+    btn.addEventListener("click", () => {
+      filterBtns.forEach(b => b.classList.remove("active"));
+      btn.classList.add("active");
+      currentOrderFilter = btn.dataset.filter;
+      renderOrdersFeed();
+    });
+  });
+}
+
+function initTabs() {
+  const tabBtns = document.querySelectorAll(".tab-btn");
+  const tabContents = document.querySelectorAll(".tab-content");
+
+  tabBtns.forEach(btn => {
+    btn.addEventListener("click", () => {
+      tabBtns.forEach(b => b.classList.remove("active"));
+      tabContents.forEach(c => c.classList.remove("active"));
+
+      btn.classList.add("active");
+      const target = document.getElementById(btn.dataset.tab);
+      if (target) target.classList.add("active");
+    });
+  });
+}
+
+async function loadSecondaryTables() {
   loadSignals();
-  loadOrders();
   loadEquity();
   loadLogs();
   loadFiles();
@@ -294,53 +563,12 @@ async function loadSignals() {
           <td>${s.timestamp}</td>
           <td><strong>${s.symbol}</strong></td>
           <td><span class="badge ${typeBadge}">${s.signal_type}</span></td>
-          <td>
-            <div class="conf-bar"><div class="conf-fill" style="width: ${s.confidence || 0}%;"></div></div>
-            <span>${(s.confidence || 0).toFixed(1)}%</span>
-          </td>
+          <td>${(s.confidence || 0).toFixed(1)}%</td>
           <td style="color: ${s.rsi_value < 30 ? 'var(--color-green)' : (s.rsi_value > 70 ? 'var(--color-red)' : 'inherit')}">${(s.rsi_value || 0).toFixed(1)}</td>
           <td>${(s.atr_value || 0).toFixed(4)}</td>
           <td>${(s.adx_value || 0).toFixed(1)}</td>
-          <td>${s.executed ? '<span class="text-green">✓ Khớp lệnh</span>' : '<span class="text-muted">Chờ</span>'}</td>
+          <td>${s.executed ? '<span class="text-green">✓ Khớp</span>' : '<span class="text-muted">Chờ</span>'}</td>
           <td>${s.order_ticket ? `<span class="text-cyan">#${s.order_ticket}</span>` : '--'}</td>
-        </tr>
-      `;
-    }).join("");
-  } catch (err) {
-    console.error(err);
-  }
-}
-
-async function loadOrders() {
-  try {
-    const res = await fetch("/api/orders");
-    const orders = await res.json();
-    document.getElementById("count-orders").innerText = orders.length;
-
-    const tbody = document.getElementById("tbody-orders");
-    if (orders.length === 0) {
-      tbody.innerHTML = `<tr><td colspan="12" style="text-align: center; color: var(--text-muted);">Chưa có lệnh giao dịch nào</td></tr>`;
-      return;
-    }
-
-    tbody.innerHTML = orders.map(o => {
-      const isBuy = o.order_type === "BUY";
-      const isClosed = o.status === "CLOSED";
-      const pnl = Number(o.profit || 0);
-      return `
-        <tr>
-          <td><strong class="text-cyan">#${o.ticket_id}</strong></td>
-          <td>${o.symbol}</td>
-          <td><span class="badge ${isBuy ? "badge-buy" : "badge-sell"}">${o.order_type}</span></td>
-          <td>${o.lot_size.toFixed(2)}</td>
-          <td>${o.open_time}</td>
-          <td>${o.open_price.toFixed(5)}</td>
-          <td>${o.close_price ? o.close_price.toFixed(5) : '--'}</td>
-          <td>${o.stop_loss ? o.stop_loss.toFixed(5) : '--'}</td>
-          <td>${o.take_profit ? o.take_profit.toFixed(5) : '--'}</td>
-          <td class="${pnl >= 0 ? 'text-green' : 'text-red'}"><strong>${pnl >= 0 ? '+' : ''}$${pnl.toFixed(2)}</strong></td>
-          <td>${o.close_reason || '--'}</td>
-          <td><span class="badge ${isClosed ? "badge-hold" : "badge-buy"}">${o.status}</span></td>
         </tr>
       `;
     }).join("");
@@ -357,7 +585,7 @@ async function loadEquity() {
 
     const tbody = document.getElementById("tbody-equity");
     if (equity.length === 0) {
-      tbody.innerHTML = `<tr><td colspan="6" style="text-align: center; color: var(--text-muted);">Chưa có dữ liệu</td></tr>`;
+      tbody.innerHTML = `<tr><td colspan="7" style="text-align: center; color: var(--text-muted);">Chưa có dữ liệu</td></tr>`;
       return;
     }
 
@@ -365,8 +593,9 @@ async function loadEquity() {
       <tr>
         <td><strong>${e.date}</strong></td>
         <td>$${Number(e.balance).toLocaleString("en-US", { minimumFractionDigits: 2 })}</td>
-        <td class="text-green">$${Number(e.equity).toLocaleString("en-US", { minimumFractionDigits: 2 })}</td>
-        <td>${Number(e.floating_pnl) >= 0 ? '+' : ''}$${Number(e.floating_pnl).toFixed(2)}</td>
+        <td class="text-cyan">$${Number(e.equity).toLocaleString("en-US", { minimumFractionDigits: 2 })}</td>
+        <td class="text-gold"><strong>${Math.round(e.equity * usdToVndRate).toLocaleString("vi-VN")} ₫</strong></td>
+        <td class="${Number(e.floating_pnl) >= 0 ? 'text-green' : 'text-red'}">${Number(e.floating_pnl) >= 0 ? '+' : ''}$${Number(e.floating_pnl).toFixed(2)}</td>
         <td>${e.total_trades}</td>
         <td>${e.win_trades}</td>
       </tr>
@@ -428,56 +657,10 @@ async function loadFiles() {
   }
 }
 
-// 3. UI Controls and Tab Switching
-function initTabs() {
-  const tabBtns = document.querySelectorAll(".tab-btn");
-  const tabContents = document.querySelectorAll(".tab-content");
-
-  tabBtns.forEach(btn => {
-    btn.addEventListener("click", () => {
-      tabBtns.forEach(b => b.classList.remove("active"));
-      tabContents.forEach(c => c.classList.remove("active"));
-
-      btn.classList.add("active");
-      const target = document.getElementById(btn.dataset.tab);
-      if (target) target.classList.add("active");
-    });
-  });
-}
-
-function initControls() {
-  // Refresh button
-  document.getElementById("btn-refresh").addEventListener("click", () => {
-    loadAllData();
-  });
-
-  // Timeframe buttons
-  const tfBtns = document.querySelectorAll(".tf-btn");
-  tfBtns.forEach(btn => {
-    btn.addEventListener("click", () => {
-      tfBtns.forEach(b => b.classList.remove("active"));
-      btn.classList.add("active");
-      currentTimeframe = btn.dataset.tf;
-      document.getElementById("active-tf").innerText = currentTimeframe;
-      loadCandleData();
-    });
-  });
-
-  // Indicator Toggles
-  document.getElementById("toggle-sma20").addEventListener("change", (e) => {
-    sma20Series.applyOptions({ visible: e.target.checked });
-  });
-
-  document.getElementById("toggle-sma50").addEventListener("change", (e) => {
-    sma50Series.applyOptions({ visible: e.target.checked });
-  });
-
-  document.getElementById("toggle-vol").addEventListener("change", (e) => {
-    volumeSeries.applyOptions({ visible: e.target.checked });
-  });
-
-  document.getElementById("toggle-rsi").addEventListener("change", (e) => {
-    const rsiCont = document.getElementById("rsi-container");
-    rsiCont.style.display = e.target.checked ? "block" : "none";
-  });
+// Toast
+function showToast(msg) {
+  const toast = document.getElementById("toast-notice");
+  toast.innerText = msg;
+  toast.classList.add("show");
+  setTimeout(() => toast.classList.remove("show"), 3500);
 }

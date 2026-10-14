@@ -19,6 +19,9 @@
     </div>
 
     <div class="header-status">
+      <div class="rate-badge">
+        <span>Tỷ giá: 1 USD ≈ 25,450 ₫</span>
+      </div>
       <div id="connection-badge" class="status-badge simulation">
         <span class="pulse-dot"></span>
         <span id="connection-text">Đang kết nối...</span>
@@ -30,116 +33,210 @@
     </div>
   </header>
 
-  <!-- Metric Cards -->
-  <section class="metrics-grid">
-    <div class="metric-card">
-      <div class="metric-label">
-        <span>Số dư (Balance)</span>
-        <span class="text-muted" id="account-currency">USD</span>
-      </div>
-      <div class="metric-value" id="val-balance">$0.00</div>
-      <div class="metric-sub text-muted">Vốn thực tế tài khoản</div>
-    </div>
+  <!-- Main 2-Column Trading Workspace -->
+  <div class="trading-workspace">
+    <!-- Left / Center Stage: Chart + VNĐ Wallet + Order Inputs -->
+    <div class="center-stage">
+      <!-- 1. Center Candlestick Chart Card -->
+      <section class="chart-card">
+        <!-- Toolbar -->
+        <div class="chart-toolbar">
+          <div class="toolbar-left">
+            <div class="symbol-badge">
+              <span id="active-symbol">EURUSD</span>
+              <span class="text-cyan" id="active-tf" style="font-size: 13px;">M5</span>
+            </div>
 
-    <div class="metric-card">
-      <div class="metric-label">
-        <span>Tài sản ròng (Equity)</span>
-        <span class="badge" id="floating-badge">+0.00</span>
-      </div>
-      <div class="metric-value" id="val-equity">$0.00</div>
-      <div class="metric-sub text-muted" id="floating-desc">PnL thả nổi: $0.00</div>
-    </div>
-
-    <div class="metric-card">
-      <div class="metric-label">
-        <span>Tỷ lệ thắng (Win Rate)</span>
-        <span class="text-cyan">AI Core</span>
-      </div>
-      <div class="metric-value text-green" id="val-winrate">0.0%</div>
-      <div class="metric-sub text-muted" id="val-trades-count">Tổng 0 lệnh đã đóng</div>
-    </div>
-
-    <div class="metric-card">
-      <div class="metric-label">
-        <span>Tổng lợi nhuận đã chốt</span>
-        <span class="text-muted">Realized</span>
-      </div>
-      <div class="metric-value" id="val-realized-profit">$0.00</div>
-      <div class="metric-sub text-muted" id="val-leverage">Đòn bẩy: 1:100</div>
-    </div>
-  </section>
-
-  <!-- Main Workspace -->
-  <main class="workspace">
-    <!-- Chart Card -->
-    <div class="chart-card">
-      <!-- Chart Toolbar -->
-      <div class="chart-toolbar">
-        <div class="toolbar-left">
-          <div class="symbol-badge">
-            <span id="active-symbol">EURUSD</span>
-            <span class="text-cyan" id="active-tf" style="font-size: 13px;">M5</span>
+            <div class="timeframe-group">
+              <button class="tf-btn" data-tf="M1">M1</button>
+              <button class="tf-btn active" data-tf="M5">M5</button>
+              <button class="tf-btn" data-tf="M15">M15</button>
+              <button class="tf-btn" data-tf="H1">H1</button>
+              <button class="tf-btn" data-tf="D1">D1</button>
+            </div>
           </div>
 
-          <div class="timeframe-group">
-            <button class="tf-btn" data-tf="M1">M1</button>
-            <button class="tf-btn active" data-tf="M5">M5</button>
-            <button class="tf-btn" data-tf="M15">M15</button>
-            <button class="tf-btn" data-tf="H1">H1</button>
-            <button class="tf-btn" data-tf="D1">D1</button>
+          <div class="toolbar-right">
+            <label class="indicator-toggle">
+              <input type="checkbox" id="toggle-sma20" checked>
+              <span style="color: #06b6d4;">SMA 20</span>
+            </label>
+            <label class="indicator-toggle">
+              <input type="checkbox" id="toggle-sma50" checked>
+              <span style="color: #f59e0b;">SMA 50</span>
+            </label>
+            <label class="indicator-toggle">
+              <input type="checkbox" id="toggle-rsi" checked>
+              <span style="color: #a855f7;">RSI 14</span>
+            </label>
+            <label class="indicator-toggle">
+              <input type="checkbox" id="toggle-vol" checked>
+              <span>Volume</span>
+            </label>
           </div>
         </div>
 
-        <div class="toolbar-right">
-          <label class="indicator-toggle">
-            <input type="checkbox" id="toggle-sma20" checked>
-            <span style="color: #06b6d4;">SMA 20</span>
-          </label>
-          <label class="indicator-toggle">
-            <input type="checkbox" id="toggle-sma50" checked>
-            <span style="color: #f59e0b;">SMA 50</span>
-          </label>
-          <label class="indicator-toggle">
-            <input type="checkbox" id="toggle-rsi" checked>
-            <span style="color: #a855f7;">RSI (14)</span>
-          </label>
-          <label class="indicator-toggle">
-            <input type="checkbox" id="toggle-vol" checked>
-            <span>Volume</span>
-          </label>
+        <!-- OHLCV Real-time Legend -->
+        <div class="ohlcv-legend">
+          <div class="ohlcv-item">Thời gian: <span id="legend-time">--</span></div>
+          <div class="ohlcv-item">O: <span id="legend-open">--</span></div>
+          <div class="ohlcv-item">H: <span id="legend-high">--</span></div>
+          <div class="ohlcv-item">L: <span id="legend-low">--</span></div>
+          <div class="ohlcv-item">C: <span id="legend-close">--</span></div>
+          <div class="ohlcv-item">Thay đổi: <span id="legend-change">--</span></div>
+          <div class="ohlcv-item">Vol: <span id="legend-vol">--</span></div>
+        </div>
+
+        <!-- Candlestick Chart Canvas -->
+        <div id="chart-container"></div>
+        <!-- RSI Subchart -->
+        <div id="rsi-container"></div>
+      </section>
+
+      <!-- 2. Dưới Chart: Tổng số dư trong ví dạng VNĐ -->
+      <section class="wallet-hero-card">
+        <div class="wallet-main-col">
+          <div class="wallet-label">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="4" width="20" height="16" rx="2"/><line x1="2" y1="10" x2="22" y2="10"/><circle cx="16" cy="15" r="1.5"/></svg>
+            Tổng Số Dư Khả Dụng Trong Ví (VNĐ)
+          </div>
+          <div class="wallet-vnd-amount" id="wallet-balance-vnd">0 ₫</div>
+          <div class="wallet-sub-row">
+            <div class="wallet-sub-item">Số dư USD: <span id="wallet-balance-usd">$0.00</span></div>
+            <div class="wallet-sub-item">•</div>
+            <div class="wallet-sub-item">Tài sản ròng (Equity): <span class="text-cyan" id="wallet-equity-vnd">0 ₫</span> (<span id="wallet-equity-usd">$0.00</span>)</div>
+            <div class="wallet-sub-item">•</div>
+            <div class="wallet-sub-item">PnL thả nổi: <span id="wallet-floating-vnd">0 ₫</span></div>
+          </div>
+        </div>
+
+        <div class="wallet-meta-stats">
+          <div class="meta-stat-item">
+            <span class="label">Đòn bẩy</span>
+            <span class="val text-cyan" id="wallet-leverage">1:100</span>
+          </div>
+          <div class="meta-stat-item">
+            <span class="label">Tỷ lệ thắng AI</span>
+            <span class="val text-green" id="wallet-winrate">0.0%</span>
+          </div>
+          <div class="meta-stat-item">
+            <span class="label">Tổng lãi đã chốt</span>
+            <span class="val text-gold" id="wallet-realized-vnd">0 ₫</span>
+          </div>
+        </div>
+      </section>
+
+      <!-- 3. Bảng Nhập Lệnh & Tính Lợi Nhuận Dự Kiến -->
+      <section class="order-entry-card">
+        <div class="order-entry-header">
+          <h3>
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2v20M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"/></svg>
+            Bảng Thiết Lập Đặt Lệnh & Tính Toán Lợi Nhuận
+          </h3>
+          <span class="text-muted" style="font-size: 12px;">Cặp: <strong>EURUSD</strong></span>
+        </div>
+
+        <div class="order-inputs-grid">
+          <!-- Input 1: Mức giá muốn đánh -->
+          <div class="form-group">
+            <label for="input-entry-price">
+              <span>Mức giá muốn đánh (Entry Price)</span>
+            </label>
+            <div class="input-with-btn">
+              <input type="number" step="0.00001" id="input-entry-price" class="form-input" placeholder="VD: 1.08500" value="1.08500">
+              <button type="button" id="btn-fill-current-price" class="btn-fill-price" title="Lấy giá đóng nến gần nhất">Giá hiện tại</button>
+            </div>
+            <span class="text-muted" style="font-size: 11px;">Mức giá khớp lệnh của bot</span>
+          </div>
+
+          <!-- Input 2: Số lot -->
+          <div class="form-group">
+            <label for="input-lot-size">
+              <span>Số lot (Khối lượng)</span>
+            </label>
+            <input type="number" step="0.01" min="0.01" max="100.0" id="input-lot-size" class="form-input" placeholder="0.10" value="0.10">
+            <div class="lot-chips">
+              <button type="button" class="lot-chip" data-lot="0.01">0.01</button>
+              <button type="button" class="lot-chip" data-lot="0.05">0.05</button>
+              <button type="button" class="lot-chip active" data-lot="0.10">0.10</button>
+              <button type="button" class="lot-chip" data-lot="0.20">0.20</button>
+              <button type="button" class="lot-chip" data-lot="0.50">0.50</button>
+              <button type="button" class="lot-chip" data-lot="1.00">1.00</button>
+            </div>
+          </div>
+
+          <!-- Input 3: Mức giá mong muốn kiếm được -->
+          <div class="form-group">
+            <label for="input-target-price">
+              <span>Mức giá mong muốn kiếm được (TP)</span>
+            </label>
+            <input type="number" step="0.00001" id="input-target-price" class="form-input" placeholder="VD: 1.08900" value="1.08900">
+            <span class="text-muted" style="font-size: 11px;">Mức giá mục tiêu chốt lời</span>
+          </div>
+        </div>
+
+        <!-- Khung hiển thị lợi nhuận ước tính thời gian thực -->
+        <div class="calc-profit-box">
+          <div class="calc-profit-title">
+            <span>Ước tính lợi nhuận khi chạm giá mục tiêu:</span>
+            <div id="calc-pips-dist" style="color: var(--color-cyan); font-weight: 600; margin-top: 2px;">+40.0 pips</div>
+          </div>
+          <div class="calc-profit-values">
+            <div>USD: <span class="calc-usd" id="calc-profit-usd">+$40.00</span></div>
+            <div>•</div>
+            <div>VNĐ: <span class="calc-vnd" id="calc-profit-vnd">+1,018,000 ₫</span></div>
+          </div>
+        </div>
+
+        <!-- Nút đặt lệnh Mua / Bán -->
+        <div class="order-actions-row">
+          <button type="button" id="btn-submit-buy" class="btn-trade-buy">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="23 6 13.5 15.5 8.5 10.5 1 18"/><polyline points="17 6 23 6 23 12"/></svg>
+            ĐẶT LỆNH BUY (LONG)
+          </button>
+          <button type="button" id="btn-submit-sell" class="btn-trade-sell">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="23 18 13.5 8.5 8.5 13.5 1 6"/><polyline points="17 18 23 18 23 12"/></svg>
+            ĐẶT LỆNH SELL (SHORT)
+          </button>
+        </div>
+      </section>
+    </div>
+
+    <!-- Right Column: Lịch Sử Các Lệnh AI Đã Đánh -->
+    <aside class="sidebar-orders">
+      <div class="sidebar-header">
+        <div class="sidebar-title-row">
+          <h2>
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/></svg>
+            LỊCH SỬ LỆNH AI ĐÃ ĐÁNH
+          </h2>
+          <span class="tab-count" id="sidebar-order-count">0</span>
+        </div>
+
+        <div class="order-filter-group">
+          <button class="filter-btn active" data-filter="ALL">Tất cả</button>
+          <button class="filter-btn" data-filter="OPEN">Đang mở</button>
+          <button class="filter-btn" data-filter="CLOSED">Đã chốt</button>
         </div>
       </div>
 
-      <!-- OHLCV Crosshair Legend -->
-      <div class="ohlcv-legend">
-        <div class="ohlcv-item">Thời gian: <span id="legend-time">--</span></div>
-        <div class="ohlcv-item">O: <span id="legend-open">--</span></div>
-        <div class="ohlcv-item">H: <span id="legend-high">--</span></div>
-        <div class="ohlcv-item">L: <span id="legend-low">--</span></div>
-        <div class="ohlcv-item">C: <span id="legend-close">--</span></div>
-        <div class="ohlcv-item">Thay đổi: <span id="legend-change">--</span></div>
-        <div class="ohlcv-item">Vol: <span id="legend-vol">--</span></div>
+      <!-- Feed danh sách lệnh -->
+      <div class="orders-list-scroll" id="orders-feed">
+        <div style="text-align: center; color: var(--text-muted); padding: 30px;">Đang tải danh sách lệnh AI...</div>
       </div>
+    </aside>
+  </div>
 
-      <!-- Candlestick Chart Area -->
-      <div id="chart-container"></div>
-      <!-- RSI Sub-chart Area -->
-      <div id="rsi-container"></div>
-    </div>
-
-    <!-- Data Tables Card -->
+  <!-- Secondary Section: Collapsible System Details -->
+  <section class="secondary-section">
     <div class="tabs-card">
       <div class="tabs-nav">
         <button class="tab-btn active" data-tab="tab-signals">
           Tín hiệu AI (bot_signals)
           <span class="tab-count" id="count-signals">0</span>
         </button>
-        <button class="tab-btn" data-tab="tab-orders">
-          Lệnh giao dịch (orders)
-          <span class="tab-count" id="count-orders">0</span>
-        </button>
         <button class="tab-btn" data-tab="tab-equity">
-          Lịch sử vốn (daily_equity)
+          Biến động vốn theo ngày (daily_equity)
           <span class="tab-count" id="count-equity">0</span>
         </button>
         <button class="tab-btn" data-tab="tab-logs">
@@ -165,68 +262,38 @@
               <th>RSI</th>
               <th>ATR</th>
               <th>ADX</th>
-              <th>Thực thi</th>
+              <th>Trạng thái</th>
               <th>Vé lệnh</th>
             </tr>
           </thead>
-          <tbody id="tbody-signals">
-            <tr><td colspan="10" style="text-align: center; color: var(--text-muted);">Đang tải tín hiệu...</td></tr>
-          </tbody>
+          <tbody id="tbody-signals"></tbody>
         </table>
       </div>
 
-      <!-- Tab 2: Orders -->
-      <div id="tab-orders" class="tab-content">
-        <table class="data-table">
-          <thead>
-            <tr>
-              <th>Ticket</th>
-              <th>Mã</th>
-              <th>Loại lệnh</th>
-              <th>Lots</th>
-              <th>Thời gian mở</th>
-              <th>Giá vào</th>
-              <th>Giá thoát</th>
-              <th>Stop Loss</th>
-              <th>Take Profit</th>
-              <th>Lợi nhuận</th>
-              <th>Lý do đóng</th>
-              <th>Trạng thái</th>
-            </tr>
-          </thead>
-          <tbody id="tbody-orders">
-            <tr><td colspan="12" style="text-align: center; color: var(--text-muted);">Đang tải lệnh...</td></tr>
-          </tbody>
-        </table>
-      </div>
-
-      <!-- Tab 3: Equity -->
+      <!-- Tab 2: Equity -->
       <div id="tab-equity" class="tab-content">
         <table class="data-table">
           <thead>
             <tr>
               <th>Ngày</th>
-              <th>Số dư (Balance)</th>
-              <th>Tài sản ròng (Equity)</th>
-              <th>Floating PnL</th>
+              <th>Số dư (Balance USD)</th>
+              <th>Tài sản ròng (Equity USD)</th>
+              <th>Tương đương VNĐ</th>
+              <th>Lãi thả nổi</th>
               <th>Tổng lệnh</th>
               <th>Lệnh thắng</th>
             </tr>
           </thead>
-          <tbody id="tbody-equity">
-            <tr><td colspan="6" style="text-align: center; color: var(--text-muted);">Đang tải lịch sử vốn...</td></tr>
-          </tbody>
+          <tbody id="tbody-equity"></tbody>
         </table>
       </div>
 
-      <!-- Tab 4: Logs -->
+      <!-- Tab 3: Logs -->
       <div id="tab-logs" class="tab-content">
-        <div id="log-container">
-          <div style="padding: 20px; color: var(--text-muted);">Đang tải nhật ký...</div>
-        </div>
+        <div id="log-container"></div>
       </div>
 
-      <!-- Tab 5: Parquet Files -->
+      <!-- Tab 4: Parquet Files -->
       <div id="tab-files" class="tab-content">
         <table class="data-table">
           <thead>
@@ -236,13 +303,14 @@
               <th>Lần cập nhật cuối</th>
             </tr>
           </thead>
-          <tbody id="tbody-files">
-            <tr><td colspan="3" style="text-align: center; color: var(--text-muted);">Đang kiểm tra thư mục data/...</td></tr>
-          </tbody>
+          <tbody id="tbody-files"></tbody>
         </table>
       </div>
     </div>
-  </main>
+  </section>
+
+  <!-- Toast Notification Container -->
+  <div id="toast-notice" class="toast-notice"></div>
 
   <script src="/static/js/dashboard.js"></script>
 </body>

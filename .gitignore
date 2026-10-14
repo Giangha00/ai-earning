@@ -37,10 +37,12 @@ env/
 .env.local
 .env.*.local
 
-# Databases
+# Databases & Data
 *.db
 *.sqlite
 *.sqlite3
+data/
+*.parquet
 
 # Logs & runtime data
 *.log

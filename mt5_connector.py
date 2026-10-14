@@ -1,5 +1,6 @@
 import importlib
 import logging
+import time
 from config import config
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - [%(levelname)s] - %(message)s")
@@ -11,6 +12,7 @@ try:
     IS_SIMULATION = False
 except (ImportError, ModuleNotFoundError):
     IS_SIMULATION = True
+    import numpy as np
 
     class MockAccountInfo:
         def __init__(self, login: int, server: str):
@@ -22,8 +24,21 @@ except (ImportError, ModuleNotFoundError):
             self.currency = "USD"
             self.leverage = 100
 
+    class MockSymbolInfo:
+        def __init__(self, symbol: str):
+            self.name = symbol
+            self.visible = True
+
     class MockMT5:
         """Bộ giả lập MT5 khi chạy trên macOS / Linux hoặc môi trường không cài MT5 Windows."""
+        TIMEFRAME_M1 = 1
+        TIMEFRAME_M5 = 5
+        TIMEFRAME_M15 = 15
+        TIMEFRAME_M30 = 30
+        TIMEFRAME_H1 = 16385
+        TIMEFRAME_H4 = 16388
+        TIMEFRAME_D1 = 16408
+
         @staticmethod
         def initialize(**kwargs) -> bool:
             return True
@@ -35,6 +50,72 @@ except (ImportError, ModuleNotFoundError):
         @staticmethod
         def account_info():
             return MockAccountInfo(config.MT5_LOGIN, config.MT5_SERVER)
+
+        @staticmethod
+        def symbol_info(symbol: str):
+            return MockSymbolInfo(symbol)
+
+        @staticmethod
+        def symbol_select(symbol: str, enable: bool = True) -> bool:
+            return True
+
+        @staticmethod
+        def copy_rates_from_pos(symbol: str, tf: int, start_pos: int, count: int):
+            """Tạo dữ liệu nến giả lập định dạng NumPy structured array chuẩn của MetaTrader 5."""
+            now = int(time.time())
+            # Giả định bước thời gian: tf (phút) * 60 (giây), mặc định 300s cho M5
+            step_seconds = 300 if tf not in (1, 5, 15, 30, 16385, 16388, 16408) else (
+                60 if tf == 1 else
+                300 if tf == 5 else
+                900 if tf == 15 else
+                1800 if tf == 30 else
+                3600 if tf == 16385 else
+                14400 if tf == 16388 else 86400
+            )
+            timestamps = now - np.arange(count, 0, -1, dtype=np.int64) * step_seconds
+            
+            # Base price tùy cặp
+            base_price = 2650.0 if "XAU" in symbol or "GOLD" in symbol else 1.0850
+            volatility = 0.5 if "XAU" in symbol or "GOLD" in symbol else 0.0003
+
+            returns = np.random.normal(0, volatility, count)
+            close_p = base_price + np.cumsum(returns)
+            open_p = np.roll(close_p, 1)
+            open_p[0] = base_price
+            high_p = np.maximum(open_p, close_p) + np.abs(np.random.normal(0, volatility * 0.5, count))
+            low_p = np.minimum(open_p, close_p) - np.abs(np.random.normal(0, volatility * 0.5, count))
+            tick_volume = np.random.randint(50, 1500, count, dtype=np.uint64)
+            spread = np.full(count, 12, dtype=np.int32)
+            real_volume = np.zeros(count, dtype=np.uint64)
+
+            dtype = [
+                ("time", "<i8"),
+                ("open", "<f8"),
+                ("high", "<f8"),
+                ("low", "<f8"),
+                ("close", "<f8"),
+                ("tick_volume", "<u8"),
+                ("spread", "<i4"),
+                ("real_volume", "<u8")
+            ]
+            rates = np.empty(count, dtype=dtype)
+            rates["time"] = timestamps
+            rates["open"] = open_p
+            rates["high"] = high_p
+            rates["low"] = low_p
+            rates["close"] = close_p
+            rates["tick_volume"] = tick_volume
+            rates["spread"] = spread
+            rates["real_volume"] = real_volume
+            return rates
+
+        @staticmethod
+        def copy_rates_range(symbol: str, tf: int, start_date, end_date):
+            start_ts = int(start_date.timestamp())
+            end_ts = int(end_date.timestamp())
+            step_seconds = 300
+            count = max(1, (end_ts - start_ts) // step_seconds)
+            return MockMT5.copy_rates_from_pos(symbol, tf, 0, count)
 
         @staticmethod
         def shutdown() -> None:

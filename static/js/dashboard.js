@@ -265,10 +265,15 @@ async function loadCandleData() {
 
     latestMarketPrice = data.latest_price || data.candles[data.candles.length - 1].close;
 
-    // Cập nhật giá mẫu vào ô nhập lệnh nếu người dùng chưa sửa
-    const entryInput = document.getElementById("input-entry-price");
-    if (!entryInput.dataset.modified) {
-      entryInput.value = latestMarketPrice.toFixed(5);
+    // Cập nhật giá mẫu vào ô nhập lệnh quy đổi ra VNĐ nếu người dùng chưa sửa
+    const entryInput = document.getElementById("input-entry-price-vnd");
+    if (entryInput && !entryInput.dataset.modified) {
+      const entryVnd = Math.round(latestMarketPrice * usdToVndRate);
+      entryInput.value = entryVnd;
+      const targetInput = document.getElementById("input-target-price-vnd");
+      if (targetInput && !targetInput.dataset.modified) {
+        targetInput.value = Math.round((latestMarketPrice + 0.0040) * usdToVndRate);
+      }
       recalcEstimatedProfit();
     }
 
@@ -301,7 +306,7 @@ function renderOrdersFeed() {
   }
 
   if (filtered.length === 0) {
-    feed.innerHTML = `<div style="text-align: center; color: var(--text-muted); padding: 30px;">Không có lệnh nào</div>`;
+    feed.innerHTML = `<div style="text-align: center; color: var(--text-muted); padding: 30px;">Chưa có lệnh thật nào. Hãy đặt lệnh ở bảng bên dưới!</div>`;
     return;
   }
 
@@ -311,6 +316,10 @@ function renderOrdersFeed() {
     const pnlUsd = Number(o.profit_usd || o.profit || 0);
     const pnlVnd = Number(o.profit_vnd || (pnlUsd * usdToVndRate));
     const isWin = pnlUsd > 0;
+
+    const openVnd = Math.round(o.open_price_vnd || (o.open_price * usdToVndRate));
+    const targetVnd = o.take_profit ? Math.round(o.take_profit_vnd || (o.take_profit * usdToVndRate)) : null;
+    const closeVnd = o.close_price ? Math.round(o.close_price_vnd || (o.close_price * usdToVndRate)) : null;
 
     let cardClass = "order-item-card";
     if (isOpen) cardClass += " is-open";
@@ -327,25 +336,25 @@ function renderOrdersFeed() {
         </div>
 
         <div class="order-details-grid">
-          <div class="order-detail-field">Giá vào: <span>${o.open_price.toFixed(5)}</span></div>
-          <div class="order-detail-field">Giá mục tiêu: <span>${o.take_profit ? o.take_profit.toFixed(5) : '--'}</span></div>
-          <div class="order-detail-field">Giá chốt: <span>${o.close_price ? o.close_price.toFixed(5) : 'Đang chạy'}</span></div>
+          <div class="order-detail-field">Giá vào (VNĐ): <span>${openVnd.toLocaleString("vi-VN")} ₫</span></div>
+          <div class="order-detail-field">Mục tiêu (VNĐ): <span>${targetVnd ? targetVnd.toLocaleString("vi-VN") + ' ₫' : '--'}</span></div>
+          <div class="order-detail-field">Giá chốt (VNĐ): <span>${closeVnd ? closeVnd.toLocaleString("vi-VN") + ' ₫' : 'Đang chạy'}</span></div>
           <div class="order-detail-field">Thời gian: <span>${o.open_time.split(" ")[1] || o.open_time}</span></div>
         </div>
 
         <div class="order-pnl-row">
           <div>
             <div class="order-pnl-usd ${pnlUsd >= 0 ? 'text-green' : 'text-red'}">
-              ${pnlUsd >= 0 ? '+' : ''}$${pnlUsd.toFixed(2)}
-            </div>
-            <div class="order-pnl-vnd">
               ${pnlVnd >= 0 ? '+' : ''}${pnlVnd.toLocaleString("vi-VN")} ₫
+            </div>
+            <div class="order-pnl-vnd" style="color: var(--text-muted); font-size: 11px;">
+              Quy đổi: ${pnlUsd >= 0 ? '+' : ''}$${pnlUsd.toFixed(2)}
             </div>
           </div>
           <div>
             ${isOpen ? `
               <button class="btn-close-order" onclick="handleCloseOrder(${o.ticket_id})">
-                Chốt lệnh
+                Chốt lệnh ngay
               </button>
             ` : `
               <span class="badge badge-hold">${o.close_reason || 'CLOSED'}</span>
@@ -371,26 +380,41 @@ window.handleCloseOrder = async function(ticketId) {
   }
 };
 
-// 4. Order Input & Profit Calculation Logic
+// 4. Order Input & Profit Calculation Logic (VNĐ)
 function initOrderForm() {
-  const entryInput = document.getElementById("input-entry-price");
+  const entryInput = document.getElementById("input-entry-price-vnd");
   const lotInput = document.getElementById("input-lot-size");
-  const targetInput = document.getElementById("input-target-price");
+  const targetInput = document.getElementById("input-target-price-vnd");
 
-  // Track modification
-  entryInput.addEventListener("input", () => {
-    entryInput.dataset.modified = "true";
-    recalcEstimatedProfit();
-  });
-  lotInput.addEventListener("input", recalcEstimatedProfit);
-  targetInput.addEventListener("input", recalcEstimatedProfit);
+  if (entryInput) {
+    entryInput.addEventListener("input", () => {
+      entryInput.dataset.modified = "true";
+      recalcEstimatedProfit();
+    });
+  }
+
+  if (targetInput) {
+    targetInput.addEventListener("input", () => {
+      targetInput.dataset.modified = "true";
+      recalcEstimatedProfit();
+    });
+  }
+
+  if (lotInput) {
+    lotInput.addEventListener("input", recalcEstimatedProfit);
+  }
 
   // Quick fill current price
-  document.getElementById("btn-fill-current-price").addEventListener("click", () => {
-    entryInput.value = latestMarketPrice.toFixed(5);
-    recalcEstimatedProfit();
-    showToast(`Đã lấy giá thị trường hiện tại: ${latestMarketPrice.toFixed(5)}`);
-  });
+  const fillBtn = document.getElementById("btn-fill-current-price");
+  if (fillBtn) {
+    fillBtn.addEventListener("click", () => {
+      const entryVnd = Math.round(latestMarketPrice * usdToVndRate);
+      entryInput.value = entryVnd;
+      targetInput.value = Math.round((latestMarketPrice + 0.0040) * usdToVndRate);
+      recalcEstimatedProfit();
+      showToast(`Đã lấy giá thị trường hiện tại: ${entryVnd.toLocaleString("vi-VN")} ₫`);
+    });
+  }
 
   // Lot quick chips
   const lotChips = document.querySelectorAll(".lot-chip");
@@ -404,27 +428,43 @@ function initOrderForm() {
   });
 
   // Order submission
-  document.getElementById("btn-submit-buy").addEventListener("click", () => executeOrder("BUY"));
-  document.getElementById("btn-submit-sell").addEventListener("click", () => executeOrder("SELL"));
+  const buyBtn = document.getElementById("btn-submit-buy");
+  const sellBtn = document.getElementById("btn-submit-sell");
+  if (buyBtn) buyBtn.addEventListener("click", () => executeOrder("BUY"));
+  if (sellBtn) sellBtn.addEventListener("click", () => executeOrder("SELL"));
 
   // Initial calculation
   recalcEstimatedProfit();
 }
 
 function recalcEstimatedProfit() {
-  const entry = parseFloat(document.getElementById("input-entry-price").value) || 0;
-  const lot = parseFloat(document.getElementById("input-lot-size").value) || 0;
-  const target = parseFloat(document.getElementById("input-target-price").value) || 0;
+  const entryVndInput = document.getElementById("input-entry-price-vnd");
+  const targetVndInput = document.getElementById("input-target-price-vnd");
+  const lotInput = document.getElementById("input-lot-size");
 
-  if (entry <= 0 || target <= 0 || lot <= 0) {
+  if (!entryVndInput || !targetVndInput || !lotInput) return;
+
+  const entryVnd = parseFloat(entryVndInput.value) || 0;
+  const targetVnd = parseFloat(targetVndInput.value) || 0;
+  const lot = parseFloat(lotInput.value) || 0;
+
+  const entryForex = entryVnd / usdToVndRate;
+  const targetForex = targetVnd / usdToVndRate;
+
+  const subEntry = document.getElementById("sub-entry-forex");
+  const subTarget = document.getElementById("sub-target-forex");
+  if (subEntry) subEntry.innerText = entryForex > 0 ? entryForex.toFixed(5) : "--";
+  if (subTarget) subTarget.innerText = targetForex > 0 ? targetForex.toFixed(5) : "--";
+
+  if (entryVnd <= 0 || targetVnd <= 0 || lot <= 0) {
     document.getElementById("calc-pips-dist").innerText = "0 pips";
     document.getElementById("calc-profit-usd").innerText = "$0.00";
     document.getElementById("calc-profit-vnd").innerText = "0 ₫";
     return;
   }
 
-  const diff = Math.abs(target - entry);
-  const pips = diff * 10000;
+  const diffForex = Math.abs(targetForex - entryForex);
+  const pips = diffForex * 10000;
   // EURUSD 1 lot = $10 per pip
   const profitUsd = pips * lot * 10;
   const profitVnd = profitUsd * usdToVndRate;
@@ -435,14 +475,17 @@ function recalcEstimatedProfit() {
 }
 
 async function executeOrder(orderType) {
-  const entry = parseFloat(document.getElementById("input-entry-price").value);
+  const entryVnd = parseFloat(document.getElementById("input-entry-price-vnd").value);
   const lot = parseFloat(document.getElementById("input-lot-size").value);
-  const target = parseFloat(document.getElementById("input-target-price").value);
+  const targetVnd = parseFloat(document.getElementById("input-target-price-vnd").value);
 
-  if (!entry || !lot || !target) {
-    showToast("Vui lòng điền đầy đủ mức giá vào, số lot và mức giá mục tiêu");
+  if (!entryVnd || !lot || !targetVnd) {
+    showToast("Vui lòng điền đầy đủ mức giá muốn đánh (VNĐ), số lot và mức giá mong muốn (VNĐ)");
     return;
   }
+
+  const entryForex = entryVnd / usdToVndRate;
+  const targetForex = targetVnd / usdToVndRate;
 
   try {
     const res = await fetch("/api/orders/place", {
@@ -452,14 +495,16 @@ async function executeOrder(orderType) {
         symbol: currentSymbol,
         order_type: orderType,
         lot_size: lot,
-        entry_price: entry,
-        target_price: target
+        entry_price: entryForex,
+        entry_price_vnd: entryVnd,
+        target_price: targetForex,
+        target_price_vnd: targetVnd
       })
     });
 
     const data = await res.json();
     if (res.ok && data.success) {
-      showToast(`✓ AI đã khớp lệnh ${orderType} ${lot} lot ${currentSymbol} (#${data.ticket_id})`);
+      showToast(`✓ AI đã khớp lệnh ${orderType} ${lot} lot tại ${entryVnd.toLocaleString("vi-VN")} ₫ (#${data.ticket_id})`);
       loadAccountData();
       loadOrdersSidebar();
       loadSecondaryTables();

@@ -33,8 +33,11 @@ class OrderPlaceRequest(BaseModel):
     symbol: str = "EURUSD"
     order_type: str = "BUY"  # BUY hoặc SELL
     lot_size: float = 0.1
-    entry_price: float
-    target_price: float  # Mức giá mong muốn kiếm được (TP)
+    entry_price: Optional[float] = None
+    entry_price_vnd: Optional[float] = None
+    target_price: Optional[float] = None
+    target_price_vnd: Optional[float] = None
+    target_profit_vnd: Optional[float] = None
     stop_loss: Optional[float] = None
 
 
@@ -57,75 +60,6 @@ def calculate_indicators(df: pd.DataFrame) -> pd.DataFrame:
     df["rsi14"] = 100 - (100 / (1 + rs))
 
     return df
-
-
-def ensure_sample_data():
-    """Tự động chèn dữ liệu mẫu vào SQLite nếu các bảng chưa có dữ liệu để hiển thị trực quan."""
-    with get_connection() as conn:
-        cursor = conn.cursor()
-        cursor.execute("SELECT COUNT(*) FROM orders;")
-        order_count = cursor.fetchone()[0]
-
-        if order_count == 0:
-            # 1. Orders mẫu
-            orders = [
-                (10124891, "EURUSD", "BUY", 0.10, "2026-10-12 08:30:00", 1.0820, "2026-10-12 14:15:00", 1.0865, 1.0780, 1.0865, -0.70, 0.0, 45.00, "TAKE_PROFIT", "CLOSED"),
-                (10124952, "EURUSD", "SELL", 0.15, "2026-10-13 09:00:00", 1.0870, "2026-10-13 16:45:00", 1.0850, 1.0910, 1.0850, -1.05, 0.15, 30.00, "TAKE_PROFIT", "CLOSED"),
-                (10125010, "EURUSD", "BUY", 0.10, "2026-10-13 18:20:00", 1.0845, "2026-10-13 21:00:00", 1.0835, 1.0835, 1.0880, -0.70, 0.0, -10.00, "STOP_LOSS", "CLOSED"),
-                (10125134, "EURUSD", "BUY", 0.20, "2026-10-14 06:10:00", 1.0852, None, None, 1.0810, 1.0920, -1.40, 0.0, 18.50, None, "OPEN")
-            ]
-            cursor.executemany("""
-                INSERT OR IGNORE INTO orders 
-                (ticket_id, symbol, order_type, lot_size, open_time, open_price, close_time, close_price, stop_loss, take_profit, commission, swap, profit, close_reason, status)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
-            """, orders)
-
-            # 2. Bot Signals mẫu
-            signals = [
-                ("2026-10-12 08:25:00", "EURUSD", "BUY", 88.5, 28.4, 0.0018, 32.4, 1, 10124891),
-                ("2026-10-13 08:55:00", "EURUSD", "SELL", 84.0, 72.8, 0.0020, 29.5, 1, 10124952),
-                ("2026-10-13 18:15:00", "EURUSD", "BUY", 79.0, 31.2, 0.0016, 26.0, 1, 10125010),
-                ("2026-10-14 06:05:00", "EURUSD", "BUY", 91.2, 26.5, 0.0022, 35.8, 1, 10125134),
-                ("2026-10-14 07:30:00", "EURUSD", "HOLD", 54.0, 48.9, 0.0014, 18.2, 0, None)
-            ]
-            cursor.executemany("""
-                INSERT INTO bot_signals (timestamp, symbol, signal_type, confidence, rsi_value, atr_value, adx_value, executed, order_ticket)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?);
-            """, signals)
-
-            # 3. Daily Equity mẫu
-            equity = [
-                ("2026-10-08", 9800.0, 9800.0, 0.0, 0, 0),
-                ("2026-10-09", 9850.0, 9850.0, 0.0, 2, 2),
-                ("2026-10-10", 9920.0, 9920.0, 0.0, 3, 2),
-                ("2026-10-11", 9935.0, 9935.0, 0.0, 1, 1),
-                ("2026-10-12", 9980.0, 9980.0, 0.0, 2, 2),
-                ("2026-10-13", 10000.0, 10000.0, 0.0, 2, 1),
-                ("2026-10-14", 10000.0, 10018.5, 18.5, 1, 0),
-            ]
-            cursor.executemany("""
-                INSERT OR IGNORE INTO daily_equity (date, balance, equity, floating_pnl, total_trades, win_trades)
-                VALUES (?, ?, ?, ?, ?, ?);
-            """, equity)
-
-            # 4. Bot Logs mẫu
-            logs = [
-                ("INFO", "mt5_connector", f"Đã kết nối tài khoản demo {config.MT5_LOGIN} sàn {config.MT5_SERVER}"),
-                ("INFO", "data_collector", "Đã đồng bộ 100,000 nến EURUSD M5 từ data storage"),
-                ("INFO", "signal_engine", "Chỉ báo RSI chạm ngưỡng 26.5, hình thành tín hiệu BUY mạnh (Confidence: 91.2%)"),
-                ("INFO", "risk_manager", "Khối lượng lệnh 0.20 lots thỏa mãn rủi ro tối đa 1.5% vốn"),
-                ("INFO", "order_execution", "Khớp lệnh BUY ticket #10125134 tại 1.08520 thành công")
-            ]
-            cursor.executemany("""
-                INSERT INTO bot_logs (log_level, module, message)
-                VALUES (?, ?, ?);
-            """, logs)
-            conn.commit()
-
-
-@app.on_event("startup")
-def startup_event():
-    ensure_sample_data()
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -279,6 +213,16 @@ def get_orders():
             pnl_usd = float(order_dict.get("profit") or 0.0)
             order_dict["profit_usd"] = round(pnl_usd, 2)
             order_dict["profit_vnd"] = round(pnl_usd * USD_VND_RATE)
+
+            open_p = float(order_dict.get("open_price") or 0.0)
+            order_dict["open_price_vnd"] = round(open_p * USD_VND_RATE, 2)
+
+            tp_p = float(order_dict.get("take_profit") or 0.0) if order_dict.get("take_profit") else None
+            order_dict["take_profit_vnd"] = round(tp_p * USD_VND_RATE, 2) if tp_p else None
+
+            close_p = float(order_dict.get("close_price") or 0.0) if order_dict.get("close_price") else None
+            order_dict["close_price_vnd"] = round(close_p * USD_VND_RATE, 2) if close_p else None
+
             orders.append(order_dict)
     return orders
 
@@ -287,23 +231,44 @@ def get_orders():
 def place_order(req: OrderPlaceRequest):
     """
     Nhận lệnh đặt từ giao diện người dùng:
-    - Mức giá muốn đánh (entry_price)
+    - Mức giá muốn đánh (entry_price hoặc entry_price_vnd)
     - Số lot (lot_size)
-    - Mức giá mong muốn kiếm được (target_price)
+    - Mức giá mong muốn kiếm được (target_price hoặc target_price_vnd)
     """
     if req.lot_size <= 0:
         raise HTTPException(status_code=400, detail="Số lot phải lớn hơn 0")
-    if req.entry_price <= 0 or req.target_price <= 0:
-        raise HTTPException(status_code=400, detail="Mức giá không hợp lệ")
 
-    # Tính lợi nhuận ước tính (EURUSD chuẩn 1 lot = 100,000 đơn vị)
-    mult = 100.0 if "XAU" in req.symbol or "GOLD" in req.symbol else 100000.0
-    if req.order_type.upper() == "BUY":
-        expected_profit_usd = (req.target_price - req.entry_price) * mult * req.lot_size
+    # Xác định entry_price (Forex)
+    if req.entry_price and req.entry_price > 0:
+        entry_price = float(req.entry_price)
+    elif req.entry_price_vnd and req.entry_price_vnd > 0:
+        entry_price = float(req.entry_price_vnd) / USD_VND_RATE
     else:
-        expected_profit_usd = (req.entry_price - req.target_price) * mult * req.lot_size
+        raise HTTPException(status_code=400, detail="Vui lòng nhập mức giá muốn đánh hợp lệ")
+
+    mult = 100.0 if "XAU" in req.symbol or "GOLD" in req.symbol else 100000.0
+
+    # Xác định target_price (Forex)
+    if req.target_price and req.target_price > 0:
+        target_price = float(req.target_price)
+    elif req.target_price_vnd and req.target_price_vnd > 0:
+        target_price = float(req.target_price_vnd) / USD_VND_RATE
+    elif req.target_profit_vnd and req.target_profit_vnd > 0:
+        # Quy đổi từ số tiền muốn kiếm được (VNĐ) -> USD -> khoảng cách giá
+        desired_usd = float(req.target_profit_vnd) / USD_VND_RATE
+        diff = desired_usd / (mult * req.lot_size)
+        target_price = entry_price + diff if req.order_type.upper() == "BUY" else entry_price - diff
+    else:
+        raise HTTPException(status_code=400, detail="Vui lòng nhập mức giá mong muốn kiếm được")
+
+    if req.order_type.upper() == "BUY":
+        expected_profit_usd = (target_price - entry_price) * mult * req.lot_size
+    else:
+        expected_profit_usd = (entry_price - target_price) * mult * req.lot_size
 
     expected_profit_vnd = expected_profit_usd * USD_VND_RATE
+    entry_price_vnd = entry_price * USD_VND_RATE
+    target_price_vnd = target_price * USD_VND_RATE
 
     ticket_id = random.randint(10126000, 10129999)
     open_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -315,10 +280,10 @@ def place_order(req: OrderPlaceRequest):
             INSERT INTO orders 
             (ticket_id, symbol, order_type, lot_size, open_time, open_price, stop_loss, take_profit, profit, status)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'OPEN');
-        """, (ticket_id, req.symbol, req.order_type.upper(), req.lot_size, open_time, req.entry_price, req.stop_loss, req.target_price, 0.0))
+        """, (ticket_id, req.symbol, req.order_type.upper(), req.lot_size, open_time, entry_price, req.stop_loss, target_price, 0.0))
 
         # Ghi log
-        msg = f"AI Bot đã vào lệnh {req.order_type.upper()} {req.lot_size} lot {req.symbol} tại giá {req.entry_price:.5f}, mục tiêu TP {req.target_price:.5f} (Dự kiến lãi: +${expected_profit_usd:.2f} / {expected_profit_vnd:,.0f} đ)"
+        msg = f"AI Bot đã vào lệnh {req.order_type.upper()} {req.lot_size} lot {req.symbol} tại giá {entry_price_vnd:,.0f} ₫ ({entry_price:.5f}), mục tiêu TP {target_price_vnd:,.0f} ₫ ({target_price:.5f}) - Dự kiến lãi: +{expected_profit_vnd:,.0f} ₫ (+${expected_profit_usd:.2f})"
         cursor.execute("""
             INSERT INTO bot_logs (log_level, module, message)
             VALUES ('INFO', 'order_entry', ?);
@@ -336,6 +301,10 @@ def place_order(req: OrderPlaceRequest):
         "success": True,
         "ticket_id": ticket_id,
         "message": f"Đặt lệnh thành công #{ticket_id}",
+        "entry_price": round(entry_price, 5),
+        "entry_price_vnd": round(entry_price_vnd),
+        "target_price": round(target_price, 5),
+        "target_price_vnd": round(target_price_vnd),
         "expected_profit_usd": round(expected_profit_usd, 2),
         "expected_profit_vnd": round(expected_profit_vnd)
     }

@@ -1,23 +1,61 @@
+import importlib
 import logging
 from config import config
 
-try:
-    import MetaTrader5 as mt5
-except ImportError:
-    mt5 = None
-
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - [%(levelname)s] - %(message)s")
+
+# Kiểm tra thư viện MetaTrader5 chính thức (chỉ có trên Windows)
+# Trên macOS / Linux: tự động kích hoạt MockMT5 để phát triển & test thử logic
+try:
+    mt5 = importlib.import_module("MetaTrader5")
+    IS_SIMULATION = False
+except (ImportError, ModuleNotFoundError):
+    IS_SIMULATION = True
+
+    class MockAccountInfo:
+        def __init__(self, login: int, server: str):
+            self.login = login
+            self.name = "Demo Trader (Chế độ giả lập macOS)"
+            self.server = server
+            self.balance = 10000.0
+            self.equity = 10000.0
+            self.currency = "USD"
+            self.leverage = 100
+
+    class MockMT5:
+        """Bộ giả lập MT5 khi chạy trên macOS / Linux hoặc môi trường không cài MT5 Windows."""
+        @staticmethod
+        def initialize(**kwargs) -> bool:
+            return True
+
+        @staticmethod
+        def login(login: int, password: str, server: str) -> bool:
+            return True
+
+        @staticmethod
+        def account_info():
+            return MockAccountInfo(config.MT5_LOGIN, config.MT5_SERVER)
+
+        @staticmethod
+        def shutdown() -> None:
+            pass
+
+        @staticmethod
+        def last_error():
+            return (0, "Success (Simulation)")
+
+    mt5 = MockMT5()
+
 
 class MT5Connector:
     @staticmethod
     def connect() -> bool:
         """Khởi động terminal và đăng nhập vào tài khoản sàn."""
-        if mt5 is None:
-            logging.error(
-                "Thư viện MetaTrader5 chưa được cài đặt hoặc không hỗ trợ trên hệ điều hành này. "
-                "(MetaTrader5 package yêu cầu Windows với terminal MT5 64-bit hoặc Windows VPS)."
+        if IS_SIMULATION:
+            logging.warning(
+                "⚠️ Đang chạy ở chế độ Giả lập (Simulation Mode) vì macOS không hỗ trợ thư viện MetaTrader5 native (yêu cầu Windows/VPS). "
+                "Hệ thống sẽ sử dụng dữ liệu mẫu để bạn kiểm thử logic."
             )
-            return False
 
         # 1. Khởi tạo terminal MT5
         init_params = {}
@@ -57,9 +95,9 @@ class MT5Connector:
     @staticmethod
     def disconnect():
         """Đóng kết nối MT5 an toàn."""
-        if mt5 is not None:
-            mt5.shutdown()
+        mt5.shutdown()
         logging.info("Đã đóng kết nối MT5.")
+
 
 if __name__ == "__main__":
     # Test thử kết nối

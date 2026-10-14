@@ -1,19 +1,19 @@
 # Module Summary: Web Dashboard (`web_app.py`)
 
 ## 1. Mục đích
-Cung cấp giao diện trực quan hóa chuyên nghiệp cho bot giao dịch, hiển thị biểu đồ nến tương tác (TradingView Lightweight Charts), các chỉ báo kỹ thuật, thông tin tài khoản MT5, và nhật ký các bảng dữ liệu trong SQLite.
+Cung cấp giao diện Trading Terminal chuyên nghiệp dành cho bot giao dịch thuật toán:
+- Biểu đồ nến TradingView tương tác ở trung tâm.
+- Hiển thị trực tiếp tổng số dư ví được quy đổi ra **VNĐ** (theo tỷ giá USD/VND hiện hành).
+- Form đặt lệnh trực quan cho phép nhập: **mức giá muốn đánh**, **số lot**, và **mức giá mong muốn kiếm được** kèm tính toán lợi nhuận dự kiến tức thời (cả USD và VNĐ).
+- Cột bên cạnh biểu đồ hiển thị danh sách **lịch sử các lệnh AI đã đánh** (ticket, loại lệnh BUY/SELL, volume, điểm vào, điểm chốt lời, lãi lỗ USD và VNĐ).
 
-## 2. Các thành phần chính
-- **Backend FastAPI (`web_app.py`)**:
-  - `GET /`: Giao diện Dashboard SPA.
-  - `GET /api/account`: Thông tin tài khoản MT5, số dư, vốn, tỷ lệ thắng.
-  - `GET /api/candles`: Đọc dữ liệu nến từ các file `.parquet` trong `data/`, tính SMA 20, SMA 50, RSI 14, Volume và định dạng chuẩn cho Lightweight Charts.
-  - `GET /api/orders`: Quản lý danh sách lệnh giao dịch (`orders`).
-  - `GET /api/signals`: Quản lý tín hiệu AI (`bot_signals`).
-  - `GET /api/equity`: Lịch sử tăng trưởng vốn (`daily_equity`).
-  - `GET /api/logs`: Nhật ký kiểm toán hệ thống (`bot_logs`).
-  - `GET /api/files`: Danh mục file parquet đã thu thập.
-- **Frontend (`templates/index.html`, `static/css/dashboard.css`, `static/js/dashboard.js`)**:
-  - Giao diện Dark Cyber Fintech cao cấp.
-  - Biểu đồ nến TradingView thời gian thực, đồng bộ trục thời gian với biểu đồ phụ RSI 14.
-  - Bảng điều khiển phân loại tab đa nhiệm.
+## 2. API Endpoints
+- `GET /`: Giao diện Dashboard SPA hoàn chỉnh.
+- `GET /api/account`: Thông tin tài khoản MT5, số dư USD, số dư quy đổi VNĐ (`balance_vnd`, `equity_vnd`, `floating_pnl_vnd`).
+- `GET /api/candles`: Đọc nến từ Parquet trong `data/`, tính toán SMA20, SMA50, RSI14.
+- `GET /api/orders`: Danh sách lệnh AI đã thực thi từ SQLite.
+- `POST /api/orders/place`: Tiếp nhận lệnh đặt từ UI và ghi nhận vào SQLite `orders` & `bot_logs`.
+- `POST /api/orders/close/{ticket_id}`: Chốt lệnh thủ công và tính toán lợi nhuận thực tế.
+- `GET /api/signals`: Danh sách tín hiệu AI (`bot_signals`).
+- `GET /api/equity`: Dữ liệu tăng trưởng vốn (`daily_equity`).
+- `GET /api/logs`: Nhật ký hoạt động (`bot_logs`).

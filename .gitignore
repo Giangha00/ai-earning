@@ -43,10 +43,13 @@ env/
 *.sqlite3
 data/
 *.parquet
+models/*.pkl
 
 # Logs & runtime data
 *.log
 logs/
+*.csv
+*.png
 
 # IDE / Editor files
 .vscode/

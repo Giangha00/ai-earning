@@ -513,6 +513,55 @@ body {
   border-color: rgba(6, 182, 212, 0.4);
 }
 
+.profit-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 5px;
+}
+
+.profit-chip {
+  background: rgba(245, 158, 11, 0.08);
+  border: 1px solid rgba(245, 158, 11, 0.25);
+  color: var(--color-gold);
+  font-size: 11px;
+  font-weight: 600;
+  padding: 3px 8px;
+  border-radius: 4px;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+
+.profit-chip:hover, .profit-chip.active {
+  background: var(--color-gold);
+  color: #000;
+  border-color: var(--color-gold);
+  font-weight: 700;
+}
+
+.quick-adj-group {
+  display: flex;
+  gap: 6px;
+  margin-top: 4px;
+}
+
+.quick-adj-btn {
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid var(--border-color);
+  color: var(--text-muted);
+  font-size: 10px;
+  font-weight: 500;
+  padding: 2px 6px;
+  border-radius: 3px;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+
+.quick-adj-btn:hover {
+  background: rgba(255, 255, 255, 0.1);
+  color: var(--text-primary);
+}
+
 /* Profit Calculation Box */
 .calc-profit-box {
   background: rgba(6, 182, 212, 0.05);

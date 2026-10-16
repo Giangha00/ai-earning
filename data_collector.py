@@ -118,7 +118,7 @@ class DataCollector:
         df = df[existing_cols]
 
         # Sắp xếp thời gian tăng dần và loại bỏ trùng lặp nếu có
-        df = df.sort_values(by="time").drop_duplicates(subset=["time"]).reset_index(drop=True)
+        df = df.sort_values(by=["time"]).drop_duplicates(subset=["time"]).reset_index(drop=True)
         return df
 
     def save_to_parquet(self, df: pd.DataFrame, symbol: str, timeframe_str: str) -> Path | None:

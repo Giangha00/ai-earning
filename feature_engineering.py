@@ -40,23 +40,27 @@ class FeatureEngineer:
 
         # MACD
         macd = ta.macd(df["close"], fast=12, slow=26, signal=9)
-        macd_col = [c for c in macd.columns if c.startswith("MACD_")][0]
-        macds_col = [c for c in macd.columns if c.startswith("MACDs_")][0]
-        macdh_col = [c for c in macd.columns if c.startswith("MACDh_")][0]
-        df["macd"] = macd[macd_col]
-        df["macd_signal"] = macd[macds_col]
-        df["macd_hist"] = macd[macdh_col]
+        if macd is not None and not macd.empty:
+            macd_col = next((c for c in macd.columns if c.startswith("MACD_")), None)
+            macds_col = next((c for c in macd.columns if c.startswith("MACDs_")), None)
+            macdh_col = next((c for c in macd.columns if c.startswith("MACDh_")), None)
+            if macd_col and macds_col and macdh_col:
+                df["macd"] = macd[macd_col]
+                df["macd_signal"] = macd[macds_col]
+                df["macd_hist"] = macd[macdh_col]
 
         # 3. Biến động (Volatility)
         df["atr_14"] = ta.atr(df["high"], df["low"], df["close"], length=14)
         df["atr_pct"] = df["atr_14"] / df["close"] * 100  # ATR theo tỷ lệ % giá
 
         bb = ta.bbands(df["close"], length=20, std=2)
-        bbu_col = [c for c in bb.columns if c.startswith("BBU")][0]
-        bbl_col = [c for c in bb.columns if c.startswith("BBL")][0]
-        df["bb_width"] = (bb[bbu_col] - bb[bbl_col]) / df["close"] * 100
-        # Vị trí giá trong dải Bollinger (%B: 0 = chạm đáy, 1 = chạm đỉnh)
-        df["bb_pct"] = (df["close"] - bb[bbl_col]) / (bb[bbu_col] - bb[bbl_col] + 1e-9)
+        if bb is not None and not bb.empty:
+            bbu_col = next((c for c in bb.columns if c.startswith("BBU")), None)
+            bbl_col = next((c for c in bb.columns if c.startswith("BBL")), None)
+            if bbu_col and bbl_col:
+                df["bb_width"] = (bb[bbu_col] - bb[bbl_col]) / df["close"] * 100
+                # Vị trí giá trong dải Bollinger (%B: 0 = chạm đáy, 1 = chạm đỉnh)
+                df["bb_pct"] = (df["close"] - bb[bbl_col]) / (bb[bbu_col] - bb[bbl_col] + 1e-9)
 
         # 4. Đặc trưng nến (Candlestick Geometry)
         body = (df["close"] - df["open"]).abs()
@@ -71,8 +75,9 @@ class FeatureEngineer:
         df["vol_ratio"] = df["tick_volume"] / (df["vol_sma_20"] + 1e-9)
 
         # 6. Yếu tố thời gian (Time Features - Forex có tính chu kỳ phiên London/New York)
-        df["hour"] = df["time"].dt.hour
-        df["dayofweek"] = df["time"].dt.dayofweek
+        time_series = pd.to_datetime(df["time"], utc=True)
+        df["hour"] = time_series.dt.hour
+        df["dayofweek"] = time_series.dt.dayofweek
 
         return df
 
@@ -127,7 +132,7 @@ class FeatureEngineer:
 
         df["target"] = labels
         # Loại bỏ horizon_bars cây nến cuối cùng vì chưa rõ kết quả tương lai
-        df = df.iloc[:-horizon_bars].copy()
+        df = df.head(n - horizon_bars).copy()
         
         # Xóa các dòng có NaN do tính chỉ báo ở đầu chu kỳ
         df = df.dropna().reset_index(drop=True)

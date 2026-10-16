@@ -113,9 +113,19 @@ except (ImportError, ModuleNotFoundError):
         def copy_rates_range(symbol: str, tf: int, start_date, end_date):
             start_ts = int(start_date.timestamp())
             end_ts = int(end_date.timestamp())
-            step_seconds = 300
+            step_seconds = 300 if tf not in (1, 5, 15, 30, 16385, 16388, 16408) else (
+                60 if tf == 1 else
+                300 if tf == 5 else
+                900 if tf == 15 else
+                1800 if tf == 30 else
+                3600 if tf == 16385 else
+                14400 if tf == 16388 else 86400
+            )
             count = max(1, (end_ts - start_ts) // step_seconds)
-            return MockMT5.copy_rates_from_pos(symbol, tf, 0, count)
+            rates = MockMT5.copy_rates_from_pos(symbol, tf, 0, count)
+            # Đồng bộ timestamps chính xác trong khoảng start_date -> end_date
+            rates["time"] = np.arange(start_ts, start_ts + count * step_seconds, step_seconds, dtype=np.int64)[:count]
+            return rates
 
         @staticmethod
         def shutdown() -> None:

@@ -8,6 +8,14 @@ numpy>=1.24.0
 pyarrow>=14.0.0
 pandas-ta>=0.3.14b0
 
+# Machine Learning
+lightgbm>=4.0.0
+scikit-learn>=1.3.0
+joblib>=1.3.0
+
 # Web Dashboard
 fastapi>=0.110.0
 uvicorn>=0.28.0
+
+# Visualization & Backtesting
+matplotlib>=3.8.0

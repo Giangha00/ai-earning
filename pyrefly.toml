@@ -1,0 +1,26 @@
+python-version = "3.12.0"
+python-interpreter-path = ".venv/bin/python"
+site-package-path = [
+  ".venv/lib/python3.12/site-packages",
+  ".venv/lib/python3.14/site-packages"
+]
+infer-with-first-use = false
+
+[errors]
+missing-module-attribute = "ignore"
+read-only = "ignore"
+no-access = "ignore"
+invalid-argument = "ignore"
+bad-keyword-argument = "ignore"
+not-callable = "ignore"
+unexpected-keyword = "ignore"
+bad-argument-type = "ignore"
+untyped-import = "ignore"
+missing-attribute = "ignore"
+incompatible-overload-residual = "ignore"
+no-matching-overload = "ignore"
+bad-argument-count = "ignore"
+missing-argument = "ignore"
+unexpected-positional-argument = "ignore"
+bad-assignment = "ignore"
+

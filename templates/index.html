@@ -20,7 +20,7 @@
 
     <div class="header-status">
       <div class="rate-badge">
-        <span>Tỷ giá: 1 USD ≈ 25,450 ₫</span>
+        <span id="header-rate-display">Tỷ giá: 1 USD ≈ 25,870 ₫</span>
       </div>
       <div id="connection-badge" class="status-badge simulation">
         <span class="pulse-dot"></span>
@@ -141,13 +141,19 @@
           <div class="form-group">
             <label for="input-entry-price-vnd">
               <span>Mức giá muốn đánh (VNĐ)</span>
-              <span class="text-gold" style="font-weight: 700;">VNĐ</span>
+              <span class="text-gold" style="font-weight: 700;">VNĐ / EUR</span>
             </label>
             <div class="input-with-btn">
-              <input type="number" step="1" id="input-entry-price-vnd" class="form-input" placeholder="27,613" value="27613">
-              <button type="button" id="btn-fill-current-price" class="btn-fill-price" title="Lấy giá đóng nến gần nhất quy đổi VNĐ">Giá hiện tại</button>
+              <input type="number" step="1" id="input-entry-price-vnd" class="form-input" placeholder="Đang tải giá thật...">
+              <button type="button" id="btn-fill-current-price" class="btn-fill-price" title="Lấy giá đóng nến thật gần nhất">⚡ Giá hiện tại</button>
             </div>
-            <span class="text-muted" style="font-size: 11px;">Tương đương: <strong class="text-cyan" id="sub-entry-forex">1.08500</strong> EURUSD</span>
+            <div style="display: flex; justify-content: space-between; align-items: center; margin-top: 2px;">
+              <span class="text-muted" style="font-size: 11px;">Tương đương: <strong class="text-cyan" id="sub-entry-forex">--</strong> EURUSD</span>
+              <div class="quick-adj-group">
+                <button type="button" class="quick-adj-btn" id="btn-adj-entry-minus">-10 pips</button>
+                <button type="button" class="quick-adj-btn" id="btn-adj-entry-plus">+10 pips</button>
+              </div>
+            </div>
           </div>
 
           <!-- Input 2: Số lot -->
@@ -165,29 +171,37 @@
               <button type="button" class="lot-chip" data-lot="0.50">0.50</button>
               <button type="button" class="lot-chip" data-lot="1.00">1.00</button>
             </div>
+            <span class="text-muted" style="font-size: 11px; margin-top: 2px;">Ký quỹ ước tính: <strong class="text-cyan" id="sub-margin-vnd">-- ₫</strong></span>
           </div>
 
           <!-- Input 3: Mức giá mong muốn kiếm được (VNĐ) -->
           <div class="form-group">
             <label for="input-target-price-vnd">
               <span>Mức giá mong muốn kiếm được (VNĐ)</span>
-              <span class="text-gold" style="font-weight: 700;">VNĐ</span>
+              <span class="text-gold" style="font-weight: 700;">VNĐ / EUR</span>
             </label>
-            <input type="number" step="1" id="input-target-price-vnd" class="form-input" placeholder="27,715" value="27715">
-            <span class="text-muted" style="font-size: 11px;">Mục tiêu TP: <strong class="text-green" id="sub-target-forex">1.08900</strong> EURUSD</span>
+            <input type="number" step="1" id="input-target-price-vnd" class="form-input" placeholder="Nhập giá chốt VNĐ...">
+            <div class="profit-chips" title="Chọn nhanh mức tiền lời bạn muốn kiếm">
+              <button type="button" class="profit-chip" data-profit="200000">+200k ₫</button>
+              <button type="button" class="profit-chip active" data-profit="500000">+500k ₫</button>
+              <button type="button" class="profit-chip" data-profit="1000000">+1M ₫</button>
+              <button type="button" class="profit-chip" data-profit="2000000">+2M ₫</button>
+              <button type="button" class="profit-chip" data-profit="5000000">+5M ₫</button>
+            </div>
+            <span class="text-muted" style="font-size: 11px; margin-top: 2px;">Mục tiêu TP: <strong class="text-green" id="sub-target-forex">--</strong> EURUSD</span>
           </div>
         </div>
 
         <!-- Khung hiển thị lợi nhuận ước tính thời gian thực -->
         <div class="calc-profit-box">
           <div class="calc-profit-title">
-            <span>Ước tính lợi nhuận khi chạm giá mục tiêu:</span>
-            <div id="calc-pips-dist" style="color: var(--color-cyan); font-weight: 600; margin-top: 2px;">+40.0 pips</div>
+            <span>Lợi nhuận mục tiêu mong muốn kiếm được:</span>
+            <div id="calc-pips-dist" style="color: var(--color-cyan); font-weight: 600; margin-top: 2px;">-- pips</div>
           </div>
           <div class="calc-profit-values">
-            <div>Lợi nhuận VNĐ: <span class="calc-vnd" id="calc-profit-vnd">+1,018,000 ₫</span></div>
+            <div>Tiền lời VNĐ: <span class="calc-vnd" id="calc-profit-vnd">-- ₫</span></div>
             <div>•</div>
-            <div>Quy đổi USD: <span class="calc-usd" id="calc-profit-usd">+$40.00</span></div>
+            <div>Quy đổi USD: <span class="calc-usd" id="calc-profit-usd">$--</span></div>
           </div>
         </div>
 

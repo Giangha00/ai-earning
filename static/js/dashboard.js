@@ -15,20 +15,242 @@ let latestMarketPrice = 1.08500;
 let allOrders = [];
 let currentOrderFilter = "ALL";
 let usdToVndRate = 25450;
+let liveSocket = null;
 
 document.addEventListener("DOMContentLoaded", () => {
   initCharts();
   initOrderForm();
   initTabs();
   initControls();
+  initMarketsModal();
+  initBalanceSync();
   loadAllData();
+  initWebSocket();
 
-  // Auto-refresh interval
+  // Auto-refresh dự phòng
   setInterval(() => {
     loadAccountData();
     loadOrdersSidebar();
-  }, 8000);
+  }, 10000);
 });
+
+// WebSocket Realtime Streaming
+function initWebSocket() {
+  const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
+  const wsUrl = `${protocol}//${window.location.host}/ws/live`;
+  const badge = document.getElementById("connection-badge");
+  const text = document.getElementById("connection-text");
+  const hudWsStatus = document.getElementById("hud-ws-status");
+
+  try {
+    liveSocket = new WebSocket(wsUrl);
+
+    liveSocket.onopen = () => {
+      console.log("🟢 WebSocket Connected to AI Trading Engine!");
+      if (badge) badge.className = "status-badge connected";
+      if (text) text.innerText = "Realtime Engine";
+      if (hudWsStatus) hudWsStatus.innerText = "🟢 WEBSOCKET REALTIME";
+    };
+
+    liveSocket.onmessage = (event) => {
+      try {
+        const msg = JSON.parse(event.data);
+        if (msg.type === "REALTIME_TICK" || msg.type === "INIT_STATE") {
+          handleRealtimeTick(msg.data);
+        } else if (msg.type === "ORDER_PLACED") {
+          showToast(`⚡ AI Bot khớp lệnh: ${msg.data.order_type} ${msg.data.lot_size} lot ${msg.data.symbol} (R:R 1:${msg.data.rr_ratio})`);
+          loadOrdersSidebar();
+          loadSignals();
+          loadAccountData();
+        }
+      } catch (err) {
+        console.error("Lỗi parse WS:", err);
+      }
+    };
+
+    liveSocket.onclose = () => {
+      if (badge) badge.className = "status-badge simulation";
+      if (text) text.innerText = "Mất kết nối WS (Đang thử lại...)";
+      if (hudWsStatus) hudWsStatus.innerText = "🟡 ĐANG KẾT NỐI LẠI...";
+      setTimeout(initWebSocket, 3000);
+    };
+
+    liveSocket.onerror = (err) => {
+      console.warn("WebSocket error:", err);
+    };
+  } catch (e) {
+    setTimeout(initWebSocket, 3000);
+  }
+
+  // Heartbeat ping
+  setInterval(() => {
+    if (liveSocket && liveSocket.readyState === WebSocket.OPEN) {
+      liveSocket.send("ping");
+    }
+  }, 10000);
+}
+
+function handleRealtimeTick(data) {
+  if (!data) return;
+
+  // 1. Cập nhật giá trên header với chỉ báo đổi màu động
+  latestMarketPrice = data.last_price || data.ask;
+  const headerLiveTick = document.getElementById("header-live-tick");
+  if (headerLiveTick) {
+    const prevText = headerLiveTick.innerText;
+    const prevPrice = parseFloat(prevText.split(":")[1]) || latestMarketPrice;
+    const isUp = latestMarketPrice >= prevPrice;
+    headerLiveTick.style.color = isUp ? "#10b981" : "#f43f5e";
+    headerLiveTick.innerText = `${data.symbol}: ${latestMarketPrice.toFixed(5)}`;
+  }
+
+  // 2. Cập nhật nến biểu đồ thời gian thực (Real-time Candlestick & Volume & Legend)
+  if (data.last_candle && candleSeries) {
+    candleSeries.update(data.last_candle);
+
+    // Cập nhật Volume cột tương ứng
+    if (volumeSeries) {
+      const isBull = data.last_candle.close >= data.last_candle.open;
+      volumeSeries.update({
+        time: data.last_candle.time,
+        value: data.last_candle.volume || 1,
+        color: isBull ? "rgba(34, 197, 94, 0.6)" : "rgba(239, 68, 68, 0.6)"
+      });
+    }
+
+    // Đồng bộ mảng nến cục bộ để crosshair không bị lệch
+    if (lastCandleData && lastCandleData.length > 0) {
+      const lastIdx = lastCandleData.length - 1;
+      if (lastCandleData[lastIdx].time === data.last_candle.time) {
+        lastCandleData[lastIdx] = data.last_candle;
+      } else if (data.last_candle.time > lastCandleData[lastIdx].time) {
+        lastCandleData.push(data.last_candle);
+      }
+    }
+
+    // Cập nhật toàn bộ thanh Legend OHLCV trên đỉnh biểu đồ
+    const dateStr = new Date(data.last_candle.time * 1000).toLocaleString("vi-VN", {
+      month: "2-digit",
+      day: "2-digit",
+      hour: "2-digit",
+      minute: "2-digit"
+    });
+    const change = data.last_candle.close - data.last_candle.open;
+    const pct = (change / (data.last_candle.open || 1)) * 100;
+    const isPos = change >= 0;
+
+    const elTime = document.getElementById("legend-time");
+    if (elTime) elTime.innerText = dateStr;
+    const elOpen = document.getElementById("legend-open");
+    if (elOpen) elOpen.innerText = data.last_candle.open.toFixed(5);
+    const elHigh = document.getElementById("legend-high");
+    if (elHigh) elHigh.innerText = data.last_candle.high.toFixed(5);
+    const elLow = document.getElementById("legend-low");
+    if (elLow) elLow.innerText = data.last_candle.low.toFixed(5);
+    const elClose = document.getElementById("legend-close");
+    if (elClose) elClose.innerText = data.last_candle.close.toFixed(5);
+    const elVol = document.getElementById("legend-vol");
+    if (elVol) elVol.innerText = (data.last_candle.volume || 1).toLocaleString();
+
+    const elChange = document.getElementById("legend-change");
+    if (elChange) {
+      elChange.innerText = `${isPos ? "+" : ""}${change.toFixed(5)} (${isPos ? "+" : ""}${pct.toFixed(2)}%)`;
+      elChange.style.color = isPos ? "#10b981" : "#f43f5e";
+    }
+  }
+
+  // 3. Cập nhật HUD AI 6 Kịch bản thị trường (Chương 1)
+  const hudCase = document.getElementById("hud-market-case");
+  const hudReason = document.getElementById("hud-case-reason");
+  if (hudCase && data.market_case) {
+    let badgeClass = "badge-case-a";
+    let caseLabel = data.market_case;
+    if (data.market_case.includes("CASE_A")) {
+      badgeClass = "badge-case-a";
+      caseLabel = "CASE A: TREND MƯỢT";
+    } else if (data.market_case.includes("CASE_B")) {
+      badgeClass = "badge-case-b";
+      caseLabel = "CASE B: VÙNG NÉN";
+    } else if (data.market_case.includes("CASE_C")) {
+      badgeClass = "badge-case-c";
+      caseLabel = "CASE C: HỖN LOẠN CÁI LOA (CẤM VÀO LỆNH)";
+    } else if (data.market_case.includes("CASE_D")) {
+      badgeClass = "badge-case-d";
+      caseLabel = "CASE D: BẪY THANH KHOẢN (VÀO ĐẢO CHIỀU)";
+    } else if (data.market_case.includes("CASE_E")) {
+      badgeClass = "badge-case-e";
+      caseLabel = "CASE E: SÓNG DẪN HƯỚNG (CHỜ RETEST)";
+    } else if (data.market_case.includes("CASE_F")) {
+      badgeClass = "badge-case-f";
+      caseLabel = "CASE F: BÃO TIN & ROLLOVER (NGẮT MẠCH)";
+    }
+    hudCase.innerHTML = `<span class="badge ${badgeClass}">${caseLabel}</span>`;
+  }
+  if (hudReason && data.market_case_reason) {
+    hudReason.innerText = data.market_case_reason;
+  }
+
+  // 4. Cập nhật HMM Regime (Chương 2.6)
+  const hudHmm = document.getElementById("hud-hmm-regime");
+  if (hudHmm && data.regime) {
+    let color = data.regime === "BULLISH" ? "text-green" : (data.regime === "BEARISH" ? "text-red" : "text-amber");
+    hudHmm.innerHTML = `<span class="${color}" style="font-weight: 700;">${data.regime} ${data.hmm_safe ? '✓ An toàn' : '⚠️ Ngắt lệnh'}</span>`;
+  }
+
+  // 5. Cập nhật OOD Isolation Forest (Chương 4.3)
+  const hudOod = document.getElementById("hud-ood-status");
+  const hudOodScore = document.getElementById("hud-ood-score");
+  if (hudOod) {
+    if (data.is_ood) {
+      hudOod.innerHTML = `<span class="text-red" style="font-weight: 700;">⚠️ CẢNH BÁO DỮ LIỆU LẠ (BỎ QUA)</span>`;
+    } else {
+      hudOod.innerHTML = `<span class="text-cyan" style="font-weight: 700;">🛡️ AN TOÀN (Dữ liệu chuẩn)</span>`;
+    }
+  }
+  if (hudOodScore) {
+    hudOodScore.innerText = `Anomaly Score: ${(data.anomaly_score || 0).toFixed(3)} (Ngưỡng OOD: 0.05)`;
+  }
+
+  // 6. Cập nhật Cầu dao 24H (Chương 4.4)
+  const hudCircuit = document.getElementById("hud-circuit-breaker");
+  if (hudCircuit && data.circuit_breaker) {
+    const isLocked = data.circuit_breaker.includes("LOCKED");
+    hudCircuit.innerHTML = isLocked
+      ? `<span class="text-red" style="font-weight: 800;">🚨 ${data.circuit_breaker}</span>`
+      : `<span class="text-green" style="font-weight: 700;">HOẠT ĐỘNG (${data.consecutive_losses || 0}/2 Lỗ)</span>`;
+  }
+
+  // 7. Độ tin cậy & Monte Carlo VaR (Chương 2.8)
+  const hudConf = document.getElementById("hud-confidence");
+  if (hudConf) hudConf.innerText = `${(data.confidence || 75.0).toFixed(1)}%`;
+  const hudVar = document.getElementById("hud-var95");
+  if (hudVar) hudVar.innerText = `$${(data.var_95 || 0).toFixed(2)}`;
+  const hudTime = document.getElementById("hud-last-update");
+  if (hudTime) hudTime.innerText = `Cập nhật: ${data.updated_at || '--'}`;
+
+  // 8. Cập nhật số dư & PnL VNĐ realtime
+  if (data.equity !== undefined) {
+    const eqVnd = Math.round(data.equity * usdToVndRate);
+    const flVnd = Math.round((data.floating_pnl || 0) * usdToVndRate);
+    const balVnd = Math.round((data.balance || data.equity) * usdToVndRate);
+
+    const wBalVnd = document.getElementById("wallet-balance-vnd");
+    if (wBalVnd) wBalVnd.innerText = `${balVnd.toLocaleString("vi-VN")} ₫`;
+    const wBalUsd = document.getElementById("wallet-balance-usd");
+    if (wBalUsd) wBalUsd.innerText = `$${(data.balance || 10000).toLocaleString("en-US", { minimumFractionDigits: 2 })}`;
+
+    const wEqVnd = document.getElementById("wallet-equity-vnd");
+    if (wEqVnd) wEqVnd.innerText = `${eqVnd.toLocaleString("vi-VN")} ₫`;
+    const wEqUsd = document.getElementById("wallet-equity-usd");
+    if (wEqUsd) wEqUsd.innerText = `$${data.equity.toLocaleString("en-US", { minimumFractionDigits: 2 })}`;
+
+    const wFloatVnd = document.getElementById("wallet-floating-vnd");
+    if (wFloatVnd) {
+      wFloatVnd.className = (data.floating_pnl || 0) >= 0 ? "text-green" : "text-red";
+      wFloatVnd.innerText = `${(data.floating_pnl || 0) >= 0 ? '+' : ''}${flVnd.toLocaleString("vi-VN")} ₫ ($${(data.floating_pnl || 0).toFixed(2)})`;
+    }
+  }
+}
 
 // 1. Initialize TradingView Lightweight Charts
 function initCharts() {
@@ -63,6 +285,8 @@ function initCharts() {
       borderColor: "rgba(255, 255, 255, 0.08)",
       timeVisible: true,
       secondsVisible: false,
+      rightOffset: 8,
+      barSpacing: 9,
     },
     rightPriceScale: {
       borderColor: "rgba(255, 255, 255, 0.08)",
@@ -80,6 +304,11 @@ function initCharts() {
     borderDownColor: "#f43f5e",
     wickUpColor: "#10b981",
     wickDownColor: "#f43f5e",
+    priceLineVisible: true,
+    lastValueVisible: true,
+    priceLineWidth: 1,
+    priceLineColor: "#06b6d4",
+    priceLineStyle: LightweightCharts.LineStyle.Dashed,
   });
 
   volumeSeries = mainChart.addHistogramSeries({
@@ -207,6 +436,7 @@ async function loadAccountData() {
     if (data.usd_vnd_rate) {
       usdToVndRate = data.usd_vnd_rate;
     }
+    currentAccountUsd = Number(data.balance) || 10000.0;
 
     const rateEl = document.getElementById("header-rate-display");
     if (rateEl) {
@@ -265,8 +495,16 @@ async function loadCandleData() {
     sma50Series.setData(data.sma50);
     rsiSeries.setData(data.rsi);
 
-    mainChart.timeScale().fitContent();
-    rsiChart.timeScale().fitContent();
+    // Hiển thị 75 nến gần nhất với khoảng thở bên phải để thấy rõ từng nhịp nến biến động live
+    const totalBars = data.candles.length;
+    mainChart.timeScale().setVisibleLogicalRange({
+      from: Math.max(0, totalBars - 75),
+      to: totalBars + 5
+    });
+    rsiChart.timeScale().setVisibleLogicalRange({
+      from: Math.max(0, totalBars - 75),
+      to: totalBars + 5
+    });
 
     latestMarketPrice = data.latest_price || data.candles[data.candles.length - 1].close;
 
@@ -346,6 +584,8 @@ function renderOrdersFeed() {
         <div class="order-details-grid">
           <div class="order-detail-field">Giá vào (VNĐ): <span>${openVnd.toLocaleString("vi-VN")} ₫</span></div>
           <div class="order-detail-field">Mục tiêu (VNĐ): <span>${targetVnd ? targetVnd.toLocaleString("vi-VN") + ' ₫' : '--'}</span></div>
+          <div class="order-detail-field">Kịch bản Price Action: <span class="text-cyan">${o.market_case || 'CASE_A_TREND'}</span></div>
+          <div class="order-detail-field">Tỷ lệ R:R: <span class="text-gold">${o.rr_ratio ? `1:${o.rr_ratio.toFixed(2)}` : '1:2.0'}</span></div>
           <div class="order-detail-field">Giá chốt (VNĐ): <span>${closeVnd ? closeVnd.toLocaleString("vi-VN") + ' ₫' : 'Đang chạy'}</span></div>
           <div class="order-detail-field">Thời gian: <span>${o.open_time.split(" ")[1] || o.open_time}</span></div>
         </div>
@@ -686,24 +926,36 @@ async function loadSignals() {
 
     const tbody = document.getElementById("tbody-signals");
     if (signals.length === 0) {
-      tbody.innerHTML = `<tr><td colspan="10" style="text-align: center; color: var(--text-muted);">Chưa có tín hiệu nào</td></tr>`;
+      tbody.innerHTML = `<tr><td colspan="11" style="text-align: center; color: var(--text-muted);">Chưa có tín hiệu nào</td></tr>`;
       return;
     }
 
     tbody.innerHTML = signals.map(s => {
-      const typeBadge = s.signal_type === "BUY" ? "badge-buy" : (s.signal_type === "SELL" ? "badge-sell" : "badge-hold");
+      let typeBadge = "badge-hold";
+      if (s.signal_type === "BUY") typeBadge = "badge-buy";
+      else if (s.signal_type === "SELL") typeBadge = "badge-sell";
+      else if (s.signal_type === "STRICT_NO_TRADE") typeBadge = "badge-case-c";
+
+      let caseBadge = "badge-case-a";
+      if (s.market_case && s.market_case.includes("CASE_B")) caseBadge = "badge-case-b";
+      else if (s.market_case && s.market_case.includes("CASE_C")) caseBadge = "badge-case-c";
+      else if (s.market_case && s.market_case.includes("CASE_D")) caseBadge = "badge-case-d";
+      else if (s.market_case && s.market_case.includes("CASE_E")) caseBadge = "badge-case-e";
+      else if (s.market_case && s.market_case.includes("CASE_F")) caseBadge = "badge-case-f";
+
       return `
         <tr>
           <td>#${s.id}</td>
           <td>${s.timestamp}</td>
           <td><strong>${s.symbol}</strong></td>
           <td><span class="badge ${typeBadge}">${s.signal_type}</span></td>
+          <td><span class="badge ${caseBadge}">${s.market_case || 'CASE_A_TREND'}</span></td>
+          <td><span class="text-cyan">${s.regime || 'BULLISH'}</span></td>
           <td>${(s.confidence || 0).toFixed(1)}%</td>
-          <td style="color: ${s.rsi_value < 30 ? 'var(--color-green)' : (s.rsi_value > 70 ? 'var(--color-red)' : 'inherit')}">${(s.rsi_value || 0).toFixed(1)}</td>
-          <td>${(s.atr_value || 0).toFixed(4)}</td>
-          <td>${(s.adx_value || 0).toFixed(1)}</td>
+          <td>${s.rr_ratio ? `1:${s.rr_ratio.toFixed(2)}` : '1:2.0'}</td>
           <td>${s.executed ? '<span class="text-green">✓ Khớp</span>' : '<span class="text-muted">Chờ</span>'}</td>
           <td>${s.order_ticket ? `<span class="text-cyan">#${s.order_ticket}</span>` : '--'}</td>
+          <td style="max-width: 250px; font-size: 11px; color: var(--text-muted);">${s.reason || '--'}</td>
         </tr>
       `;
     }).join("");
@@ -795,7 +1047,238 @@ async function loadFiles() {
 // Toast
 function showToast(msg) {
   const toast = document.getElementById("toast-notice");
+  if (!toast) return;
   toast.innerText = msg;
   toast.classList.add("show");
   setTimeout(() => toast.classList.remove("show"), 3500);
+}
+
+// ==========================================================================
+// 1. DANH MỤC 355 THỊ TRƯỜNG EXNESS (MT5 API)
+// ==========================================================================
+let allMarketsList = [];
+let currentMarketCategory = "all";
+
+function initMarketsModal() {
+  const btnOpen = document.getElementById("btn-open-markets");
+  const modal = document.getElementById("markets-modal");
+  const btnClose = document.getElementById("btn-close-markets");
+  const searchInput = document.getElementById("markets-search-input");
+  const catButtons = document.querySelectorAll(".cat-tab-btn");
+
+  if (!modal) return;
+
+  if (btnOpen) {
+    btnOpen.addEventListener("click", () => {
+      modal.classList.remove("hidden");
+      if (allMarketsList.length === 0) {
+        loadMarketsList();
+      }
+      setTimeout(() => searchInput && searchInput.focus(), 100);
+    });
+  }
+
+  if (btnClose) {
+    btnClose.addEventListener("click", () => {
+      modal.classList.add("hidden");
+    });
+  }
+
+  modal.addEventListener("click", (e) => {
+    if (e.target === modal) {
+      modal.classList.add("hidden");
+    }
+  });
+
+  // Filter tabs
+  catButtons.forEach(btn => {
+    btn.addEventListener("click", () => {
+      catButtons.forEach(b => b.classList.remove("active"));
+      btn.classList.add("active");
+      currentMarketCategory = btn.dataset.cat || "all";
+      filterAndRenderMarkets();
+    });
+  });
+
+  // Search filter
+  if (searchInput) {
+    searchInput.addEventListener("input", () => {
+      filterAndRenderMarkets();
+    });
+  }
+}
+
+async function loadMarketsList() {
+  try {
+    const res = await fetch("/api/markets");
+    const data = await res.json();
+    allMarketsList = data.markets || [];
+    filterAndRenderMarkets();
+  } catch (err) {
+    console.error("Lỗi nạp danh sách thị trường:", err);
+  }
+}
+
+function filterAndRenderMarkets() {
+  const container = document.getElementById("markets-list-body");
+  if (!container) return;
+
+  const searchInput = document.getElementById("markets-search-input");
+  const query = (searchInput ? searchInput.value : "").toLowerCase().trim();
+
+  const filtered = allMarketsList.filter(m => {
+    // Category match
+    let matchCat = true;
+    if (currentMarketCategory === "forex") {
+      matchCat = m.category === "Forex";
+    } else if (currentMarketCategory === "metals_energy") {
+      matchCat = m.category === "Kim loại & Dầu";
+    } else if (currentMarketCategory === "crypto") {
+      matchCat = m.category === "Crypto";
+    } else if (currentMarketCategory === "indices") {
+      matchCat = m.category === "Chỉ số";
+    } else if (currentMarketCategory === "stocks") {
+      matchCat = m.category === "Cổ phiếu";
+    }
+
+    // Search query match
+    let matchSearch = true;
+    if (query) {
+      matchSearch = m.symbol.toLowerCase().includes(query) || (m.name && m.name.toLowerCase().includes(query));
+    }
+
+    return matchCat && matchSearch;
+  });
+
+  if (filtered.length === 0) {
+    container.innerHTML = `<div style="grid-column: 1 / -1; text-align: center; padding: 40px; color: var(--text-muted);">Không tìm thấy thị trường nào phù hợp với tìm kiếm "${query}"</div>`;
+    return;
+  }
+
+  container.innerHTML = filtered.map(m => {
+    let catClass = "cat-forex";
+    if (m.category === "Kim loại & Dầu") catClass = "cat-metals";
+    else if (m.category === "Crypto") catClass = "cat-crypto";
+    else if (m.category === "Chỉ số") catClass = "cat-indices";
+    else if (m.category === "Cổ phiếu") catClass = "cat-stocks";
+
+    const isCurrent = m.symbol === currentSymbol;
+
+    return `
+      <div class="market-item-card" onclick="selectMarket('${m.symbol}')" style="${isCurrent ? 'border-color: var(--color-cyan); background: rgba(6, 182, 212, 0.12);' : ''}">
+        <div class="market-item-left">
+          <div class="market-item-symbol">
+            <span>${m.symbol}</span>
+            <span class="market-badge-cat ${catClass}">${m.category}</span>
+            ${isCurrent ? '<span style="color: var(--color-cyan); font-size: 11px;">● Đang xem</span>' : ''}
+          </div>
+          <div class="market-item-name" title="${m.name}">${m.name}</div>
+        </div>
+        <div class="market-item-right">
+          <div class="market-item-price">${(m.base || 1.0).toFixed(m.digits >= 3 ? 3 : m.digits)}</div>
+          <div class="market-item-spread">Spread: ${m.spread} pts</div>
+        </div>
+      </div>
+    `;
+  }).join("");
+}
+
+function selectMarket(symbol) {
+  if (currentSymbol === symbol) {
+    const modal = document.getElementById("markets-modal");
+    if (modal) modal.classList.add("hidden");
+    return;
+  }
+
+  currentSymbol = symbol;
+  const activeSymEl = document.getElementById("active-symbol");
+  if (activeSymEl) activeSymEl.innerText = symbol;
+
+  const modal = document.getElementById("markets-modal");
+  if (modal) modal.classList.add("hidden");
+
+  showToast(`⚡ Đã chuyển sang thị trường: ${symbol}`);
+  loadCandleData();
+  filterAndRenderMarkets();
+}
+
+// ==========================================================================
+// 2. ĐỒNG BỘ SỐ DƯ TÀI KHOẢN VÍ EXNESS
+// ==========================================================================
+let currentAccountUsd = 10000.0;
+
+function initBalanceSync() {
+  const btnSync = document.getElementById("btn-sync-balance");
+  const modal = document.getElementById("balance-modal");
+  const btnClose = document.getElementById("btn-close-balance");
+  const form = document.getElementById("form-sync-balance");
+  const inputUsd = document.getElementById("input-sync-balance-usd");
+  const previewVnd = document.getElementById("sync-balance-vnd-preview");
+
+  if (!modal) return;
+
+  if (btnSync) {
+    btnSync.addEventListener("click", () => {
+      modal.classList.remove("hidden");
+      if (inputUsd) {
+        inputUsd.value = currentAccountUsd;
+        updatePreview();
+        setTimeout(() => inputUsd.focus(), 100);
+      }
+    });
+  }
+
+  if (btnClose) {
+    btnClose.addEventListener("click", () => {
+      modal.classList.add("hidden");
+    });
+  }
+
+  modal.addEventListener("click", (e) => {
+    if (e.target === modal) {
+      modal.classList.add("hidden");
+    }
+  });
+
+  function updatePreview() {
+    if (!inputUsd || !previewVnd) return;
+    const usd = parseFloat(inputUsd.value) || 0;
+    const vnd = Math.round(usd * usdToVndRate);
+    previewVnd.innerText = `${vnd.toLocaleString("vi-VN")} ₫`;
+  }
+
+  if (inputUsd) {
+    inputUsd.addEventListener("input", updatePreview);
+  }
+
+  if (form) {
+    form.addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const newBal = parseFloat(inputUsd.value);
+      if (isNaN(newBal) || newBal < 0) {
+        showToast("⚠️ Vui lòng nhập số dư hợp lệ!");
+        return;
+      }
+
+      try {
+        const res = await fetch("/api/account/balance", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ balance: newBal })
+        });
+        const resData = await res.json();
+        if (res.ok) {
+          currentAccountUsd = newBal;
+          modal.classList.add("hidden");
+          showToast(`✅ ${resData.message || 'Đã đồng bộ số dư Exness thành công!'}`);
+          await loadAccountData();
+        } else {
+          showToast(`❌ Lỗi: ${resData.detail || 'Không thể cập nhật số dư'}`);
+        }
+      } catch (err) {
+        console.error(err);
+        showToast("❌ Lỗi kết nối máy chủ");
+      }
+    });
+  }
 }

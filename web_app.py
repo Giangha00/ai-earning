@@ -6,7 +6,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional, List, Dict, Any
 
-from fastapi import FastAPI, Query, HTTPException
+from fastapi import FastAPI, Query, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
@@ -14,12 +14,14 @@ import pandas as pd
 import numpy as np
 
 from config import BASE_DIR, config
-from db import get_connection
+from db import get_connection, init_database
 from mt5_connector import mt5, MT5Connector, IS_SIMULATION
+from ai_trading_engine import AITradingEngine
+from ai_price_action import MarketCase
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - [%(levelname)s] - %(message)s")
 
-app = FastAPI(title="AI Earning - Trading Terminal", version="1.1.0")
+app = FastAPI(title="AI Earning - Trading Terminal", version="2.0.0")
 
 # Mount thư mục static
 STATIC_DIR = BASE_DIR / "static"
@@ -82,8 +84,43 @@ def calculate_indicators(df: pd.DataFrame) -> pd.DataFrame:
 
 
 @app.on_event("startup")
-def startup_event():
+async def startup_event():
     fetch_live_usd_vnd_rate()
+    init_database()
+    MT5Connector.connect()
+    # Khởi động AI Trading Engine chạy ngầm thời gian thực
+    engine = AITradingEngine()
+    engine.start()
+    logging.info("Hệ thống Web App và AI Trading Engine Realtime đã sẵn sàng.")
+
+
+@app.on_event("shutdown")
+async def shutdown_event():
+    engine = AITradingEngine()
+    engine.stop()
+    MT5Connector.disconnect()
+    logging.info("Hệ thống Web App đã tắt an toàn.")
+
+
+@app.websocket("/ws/live")
+async def websocket_live_endpoint(websocket: WebSocket):
+    """
+    WebSocket thời gian thực kết nối 2 chiều giữa Frontend & Backend.
+    Truyền dữ liệu: Live tick, Real-time Candle, Market Cases A-F,
+    HMM Regimes, OOD Anomaly, Circuit Breaker, và VNĐ Balance/PnL.
+    """
+    engine = AITradingEngine()
+    await engine.register_websocket(websocket)
+    try:
+        while True:
+            # Lắng nghe tin nhắn từ client (ping/pong)
+            msg = await websocket.receive_text()
+            if msg == "ping":
+                await websocket.send_text("pong")
+    except WebSocketDisconnect:
+        engine.unregister_websocket(websocket)
+    except Exception:
+        engine.unregister_websocket(websocket)
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -93,6 +130,13 @@ def get_dashboard():
     if html_file.exists():
         return HTMLResponse(content=html_file.read_text(encoding="utf-8"))
     return HTMLResponse("<h1>Loading Dashboard...</h1>")
+
+
+@app.get("/api/ai_status")
+def get_ai_status():
+    """Lấy trạng thái AI Engine, 6 kịch bản thị trường, HMM, OOD và Cầu dao 24H."""
+    engine = AITradingEngine()
+    return engine.latest_state
 
 
 @app.get("/api/account")
@@ -122,6 +166,8 @@ def get_account_info():
     floating_pnl_vnd = floating_profit * rate
     total_profit_vnd = (total_profit or 0.0) * rate
 
+    engine = AITradingEngine()
+
     return {
         "status": "connected",
         "is_simulation": IS_SIMULATION,
@@ -144,26 +190,134 @@ def get_account_info():
         "leverage": getattr(account_info, "leverage", 100),
         "closed_trades": closed_trades or 0,
         "win_rate": round(win_rate, 1),
+        # Realtime AI Metrics
+        "market_case": engine.latest_state.get("market_case", "CASE_A_TREND"),
+        "regime": engine.latest_state.get("regime", "BULLISH"),
+        "circuit_breaker": engine.latest_state.get("circuit_breaker", "NORMAL"),
+        "var_95": engine.latest_state.get("var_95", 0.0),
+    }
+
+
+class BalanceUpdateRequest(BaseModel):
+    balance: float
+
+
+@app.post("/api/account/balance")
+def update_account_balance(req: BalanceUpdateRequest):
+    """
+    Đồng bộ số dư thực tế từ tài khoản Exness của người dùng.
+    Lưu vào Database app_settings, file .env, và cập nhật toàn bộ Engine & MockMT5.
+    """
+    if req.balance < 0:
+        raise HTTPException(status_code=400, detail="Số dư không thể âm")
+
+    from db import set_setting
+    set_setting("account_balance", str(req.balance))
+    config.MT5_BALANCE = req.balance
+
+    if hasattr(mt5, "set_balance"):
+        mt5.set_balance(req.balance)
+
+    # Đồng bộ vào Engine
+    engine = AITradingEngine()
+    engine.latest_state["balance"] = req.balance
+    engine.latest_state["equity"] = req.balance
+
+    # Cập nhật cả file .env để lưu vĩnh viễn
+    try:
+        env_path = BASE_DIR / ".env"
+        if env_path.exists():
+            content = env_path.read_text(encoding="utf-8")
+            if "MT5_BALANCE=" in content:
+                import re
+                content = re.sub(r"MT5_BALANCE=.*", f"MT5_BALANCE={req.balance}", content)
+            else:
+                content += f"\nMT5_BALANCE={req.balance}\n"
+            env_path.write_text(content, encoding="utf-8")
+    except Exception as e:
+        logging.warning(f"Không thể ghi .env: {e}")
+
+    return {
+        "status": "success",
+        "balance": req.balance,
+        "message": f"Đã đồng bộ số dư Exness: ${req.balance:,.2f} USD"
+    }
+
+
+@app.get("/api/markets")
+@app.get("/api/symbols")
+def get_all_markets_api(category: Optional[str] = None, search: Optional[str] = None):
+    """
+    Xem toàn bộ 355 thị trường trên MT5 / Exness.
+    Hỗ trợ lọc theo danh mục: 'all', 'forex', 'metals_energy', 'crypto', 'indices', 'stocks'
+    hoặc tìm kiếm theo tên/mã symbol.
+    """
+    import exness_markets
+    all_markets = exness_markets.ALL_EXNESS_MARKETS
+    filtered = all_markets
+
+    if category and category.lower() != "all":
+        cat_map = {
+            "forex": "Forex",
+            "metals": "Kim loại & Dầu",
+            "metals_energy": "Kim loại & Dầu",
+            "crypto": "Crypto",
+            "indices": "Chỉ số",
+            "stocks": "Cổ phiếu"
+        }
+        target_cat = cat_map.get(category.lower(), category)
+        filtered = [m for m in filtered if m.get("category", "") == target_cat]
+
+    if search:
+        q = search.lower().strip()
+        filtered = [m for m in filtered if q in m.get("symbol", "").lower() or q in m.get("name", "").lower()]
+
+    return {
+        "total": len(all_markets),
+        "count": len(filtered),
+        "broker": "Exness (Exness-MT5Trial7)",
+        "categories": {
+            "all": len(all_markets),
+            "forex": len(exness_markets.FOREX_MARKETS),
+            "metals_energy": len(exness_markets.METALS_ENERGY_MARKETS),
+            "crypto": len(exness_markets.CRYPTO_MARKETS),
+            "indices": len(exness_markets.INDICES_MARKETS),
+            "stocks": len(exness_markets.STOCKS_MARKETS),
+        },
+        "markets": filtered
     }
 
 
 @app.get("/api/candles")
 def get_candles(symbol: str = "EURUSD", timeframe: str = "M5", limit: int = 1500):
     """
-    Đọc dữ liệu nến từ Parquet file và trả về dữ liệu chuẩn cho TradingView Lightweight Charts.
+    Đọc dữ liệu nến từ Parquet file / Engine và trả về dữ liệu chuẩn cho TradingView Lightweight Charts.
     """
-    data_dir = BASE_DIR / "data"
-    pattern = str(data_dir / f"{symbol}_{timeframe}_*.parquet")
-    files = glob.glob(pattern)
+    engine = AITradingEngine()
+    if not engine.df_candles.empty and symbol == engine.symbol:
+        df = engine.df_candles.copy()
+    else:
+        data_dir = BASE_DIR / "data"
+        pattern = str(data_dir / f"{symbol}_{timeframe}_*.parquet")
+        files = glob.glob(pattern)
 
-    if not files:
-        all_files = glob.glob(str(data_dir / "*.parquet"))
-        if not all_files:
-            return JSONResponse({"candles": [], "volume": [], "sma20": [], "sma50": [], "rsi": []})
-        files = all_files
+        if not files:
+            # Nếu là symbol khác chưa có parquet (XAUUSD, BTCUSD, US30...), sinh nến chuẩn từ MT5
+            if hasattr(mt5, "copy_rates_from_pos"):
+                tf_val = 5 if timeframe == "M5" else (1 if timeframe == "M1" else 15)
+                rates = mt5.copy_rates_from_pos(symbol, tf_val, 0, min(limit, 500))
+                df = pd.DataFrame(rates)
+                df["time"] = pd.to_datetime(df["time"], unit="s", utc=True)
+            else:
+                all_files = glob.glob(str(data_dir / "*.parquet"))
+                if not all_files:
+                    return JSONResponse({"candles": [], "volume": [], "sma20": [], "sma50": [], "rsi": []})
+                latest_file = max(all_files, key=os.path.getmtime)
+                df = pd.read_parquet(latest_file)
+        else:
+            latest_file = max(files, key=os.path.getmtime)
+            df = pd.read_parquet(latest_file)
 
-    latest_file = max(files, key=os.path.getmtime)
-    df = pd.read_parquet(latest_file)
     df = df.sort_values(by="time").reset_index(drop=True)
     df = calculate_indicators(df)
 
@@ -208,10 +362,10 @@ def get_candles(symbol: str = "EURUSD", timeframe: str = "M5", limit: int = 1500
         if pd.notna(rsi_val):
             rsi.append({"time": ts, "value": round(float(rsi_val), 2)})
 
-    latest_price = candles[-1]["close"] if candles else 1.0850
+    latest_price = candles[-1]["close"] if candles else 1.1260
 
     return {
-        "file_name": os.path.basename(latest_file),
+        "symbol": symbol,
         "total_candles": len(df),
         "latest_price": latest_price,
         "candles": candles,
@@ -224,12 +378,13 @@ def get_candles(symbol: str = "EURUSD", timeframe: str = "M5", limit: int = 1500
 
 @app.get("/api/orders")
 def get_orders():
-    """Lấy danh sách lệnh giao dịch của AI từ SQLite kèm quy đổi VNĐ."""
+    """Lấy danh sách lệnh giao dịch của AI từ SQLite kèm quy đổi VNĐ & Kịch bản Price Action."""
     with get_connection() as conn:
         cursor = conn.cursor()
         cursor.execute("""
             SELECT ticket_id, symbol, order_type, lot_size, open_time, open_price, 
-                   close_time, close_price, stop_loss, take_profit, profit, close_reason, status
+                   close_time, close_price, stop_loss, take_profit, profit, close_reason, status,
+                   market_case, rr_ratio
             FROM orders 
             ORDER BY open_time DESC;
         """)
@@ -258,13 +413,16 @@ def get_orders():
 @app.post("/api/orders/place")
 def place_order(req: OrderPlaceRequest):
     """
-    Nhận lệnh đặt từ giao diện người dùng:
-    - Mức giá muốn đánh (entry_price hoặc entry_price_vnd)
-    - Số lot (lot_size)
-    - Mức giá mong muốn kiếm được (target_price hoặc target_price_vnd)
+    Nhận lệnh đặt từ giao diện người dùng kèm thẩm định R:R & Quản lý rủi ro.
     """
     if req.lot_size <= 0:
         raise HTTPException(status_code=400, detail="Số lot phải lớn hơn 0")
+
+    # Kiểm tra Cầu dao ngắt mạch 24h
+    engine = AITradingEngine()
+    locked_24h, lock_reason = engine.risk_manager.is_locked_24h()
+    if locked_24h:
+        raise HTTPException(status_code=403, detail=f"Cầu dao ngắt mạch 24H đang kích hoạt: {lock_reason}. Không thể đặt lệnh mới!")
 
     # Xác định entry_price (Forex)
     if req.entry_price and req.entry_price > 0:
@@ -282,12 +440,26 @@ def place_order(req: OrderPlaceRequest):
     elif req.target_price_vnd and req.target_price_vnd > 0:
         target_price = float(req.target_price_vnd) / USD_VND_RATE
     elif req.target_profit_vnd and req.target_profit_vnd > 0:
-        # Quy đổi từ số tiền muốn kiếm được (VNĐ) -> USD -> khoảng cách giá
         desired_usd = float(req.target_profit_vnd) / USD_VND_RATE
         diff = desired_usd / (mult * req.lot_size)
         target_price = entry_price + diff if req.order_type.upper() == "BUY" else entry_price - diff
     else:
         raise HTTPException(status_code=400, detail="Vui lòng nhập mức giá mong muốn kiếm được")
+
+    # Stop Loss mặc định nếu người dùng chưa nhập
+    sl_price = req.stop_loss
+    if sl_price is None or sl_price <= 0:
+        diff_sl = abs(target_price - entry_price) / 2.0  # R:R chuẩn 1:2
+        sl_price = entry_price - diff_sl if req.order_type.upper() == "BUY" else entry_price + diff_sl
+
+    # Thẩm định tỷ lệ R:R theo CHƯƠNG 3.1 (Tối thiểu 1:1.5)
+    rr_valid, calc_rr, _, _, rr_msg = engine.risk_manager.check_rr_ratio(
+        entry_price=entry_price,
+        sl_price=sl_price,
+        tp_price=target_price,
+    )
+    if not rr_valid:
+        raise HTTPException(status_code=400, detail=f"{rr_msg} Vui lòng điều chỉnh TP hoặc SL hợp lý.")
 
     if req.order_type.upper() == "BUY":
         expected_profit_usd = (target_price - entry_price) * mult * req.lot_size
@@ -301,50 +473,25 @@ def place_order(req: OrderPlaceRequest):
     ticket_id = random.randint(10126000, 10129999)
     open_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-    # Tính toán các chỉ báo kỹ thuật thực tế từ nến gần nhất
-    data_dir = BASE_DIR / "data"
-    parquet_files = sorted(glob.glob(str(data_dir / "EURUSD_M5_*.parquet")), key=os.path.getmtime, reverse=True)
-    real_rsi = 50.0
-    real_atr = 0.0012
-    real_adx = 24.5
-    ai_confidence = 62.5
-
-    if parquet_files:
-        try:
-            df_recent = pd.read_parquet(parquet_files[0]).tail(60).copy()
-            df_recent = calculate_indicators(df_recent)
-            last_r = df_recent.iloc[-1]
-            if pd.notna(last_r.get("rsi14")):
-                real_rsi = round(float(last_r["rsi14"]), 1)
-            hl = (df_recent["high"] - df_recent["low"]).mean()
-            real_atr = round(float(hl), 5)
-            # Tính độ tự tin AI từ độ lệch RSI và khoảng cách mục tiêu
-            rsi_strength = abs(50.0 - real_rsi) / 50.0
-            ai_confidence = round(52.0 + (rsi_strength * 35.0), 1)
-        except Exception as e:
-            logging.warning(f"Lỗi đọc chỉ báo thời gian thực: {e}")
+    current_case = engine.latest_state.get("market_case", "CASE_A_TREND")
+    regime = engine.latest_state.get("regime", "BULLISH")
+    confidence = engine.latest_state.get("confidence", 75.0)
 
     with get_connection() as conn:
         cursor = conn.cursor()
-        # Thêm vào orders
         cursor.execute("""
             INSERT INTO orders 
-            (ticket_id, symbol, order_type, lot_size, open_time, open_price, stop_loss, take_profit, profit, status)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'OPEN');
-        """, (ticket_id, req.symbol, req.order_type.upper(), req.lot_size, open_time, entry_price, req.stop_loss, target_price, 0.0))
+            (ticket_id, symbol, order_type, lot_size, open_time, open_price, stop_loss, take_profit, profit, status, market_case, rr_ratio)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'OPEN', ?, ?);
+        """, (ticket_id, req.symbol, req.order_type.upper(), req.lot_size, open_time, entry_price, sl_price, target_price, 0.0, current_case, calc_rr))
 
-        # Ghi log
-        msg = f"AI Bot đã vào lệnh {req.order_type.upper()} {req.lot_size} lot {req.symbol} tại giá {entry_price_vnd:,.0f} ₫ ({entry_price:.5f}), mục tiêu TP {target_price_vnd:,.0f} ₫ ({target_price:.5f}) - Dự kiến lãi: +{expected_profit_vnd:,.0f} ₫ (+${expected_profit_usd:.2f})"
-        cursor.execute("""
-            INSERT INTO bot_logs (log_level, module, message)
-            VALUES ('INFO', 'order_entry', ?);
-        """, (msg,))
+        msg = f"Đã vào lệnh {req.order_type.upper()} #{ticket_id} {req.lot_size} lot {req.symbol} tại giá {entry_price_vnd:,.0f} ₫ ({entry_price:.5f}), TP {target_price_vnd:,.0f} ₫ ({target_price:.5f}) - Dự kiến lãi: +{expected_profit_vnd:,.0f} ₫ (R:R 1:{calc_rr:.2f})"
+        cursor.execute("INSERT INTO bot_logs (log_level, module, message) VALUES ('INFO', 'order_entry', ?);", (msg,))
 
-        # Thêm vào tín hiệu bot với chỉ báo thật
         cursor.execute("""
-            INSERT INTO bot_signals (timestamp, symbol, signal_type, confidence, rsi_value, atr_value, adx_value, executed, order_ticket)
-            VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?);
-        """, (open_time, req.symbol, req.order_type.upper(), ai_confidence, real_rsi, real_atr, real_adx, ticket_id))
+            INSERT INTO bot_signals (timestamp, symbol, signal_type, confidence, rsi_value, atr_value, adx_value, market_case, regime, anomaly_score, rr_ratio, reason, executed, order_ticket)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?);
+        """, (open_time, req.symbol, req.order_type.upper(), confidence, 50.0, 0.0012, 25.0, current_case, regime, 0.0, calc_rr, f"Lệnh thủ công R:R 1:{calc_rr:.2f}", ticket_id))
 
         conn.commit()
 
@@ -356,6 +503,7 @@ def place_order(req: OrderPlaceRequest):
         "entry_price_vnd": round(entry_price_vnd),
         "target_price": round(target_price, 5),
         "target_price_vnd": round(target_price_vnd),
+        "rr_ratio": round(calc_rr, 2),
         "expected_profit_usd": round(expected_profit_usd, 2),
         "expected_profit_vnd": round(expected_profit_vnd)
     }
@@ -363,7 +511,7 @@ def place_order(req: OrderPlaceRequest):
 
 @app.post("/api/orders/close/{ticket_id}")
 def close_order(ticket_id: int):
-    """Đóng lệnh giao dịch thủ công hoặc khi chạm mục tiêu."""
+    """Đóng lệnh giao dịch thủ công."""
     close_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     with get_connection() as conn:
         cursor = conn.cursor()
@@ -380,14 +528,14 @@ def close_order(ticket_id: int):
 
         cursor.execute("""
             UPDATE orders 
-            SET close_time = ?, close_price = ?, profit = ?, close_reason = 'TARGET_REACHED', status = 'CLOSED'
+            SET close_time = ?, close_price = ?, profit = ?, close_reason = 'MANUAL_CLOSE', status = 'CLOSED'
             WHERE ticket_id = ?;
         """, (close_time, close_price, profit, ticket_id))
 
         cursor.execute("""
             INSERT INTO bot_logs (log_level, module, message)
             VALUES ('INFO', 'order_close', ?);
-        """, (f"Đã chốt lệnh #{ticket_id} {symbol} tại {close_price}, lợi nhuận: +${profit:.2f} ({profit * USD_VND_RATE:,.0f} đ)",))
+        """, (f"Đã đóng lệnh #{ticket_id} {symbol} tại {close_price}, lợi nhuận: +${profit:.2f} ({profit * USD_VND_RATE:,.0f} đ)",))
 
         conn.commit()
 
@@ -396,11 +544,12 @@ def close_order(ticket_id: int):
 
 @app.get("/api/signals")
 def get_signals():
-    """Lấy danh sách tín hiệu bot từ SQLite."""
+    """Lấy danh sách tín hiệu bot từ SQLite kèm Market Case và HMM Regime."""
     with get_connection() as conn:
         cursor = conn.cursor()
         cursor.execute("""
-            SELECT id, timestamp, symbol, signal_type, confidence, rsi_value, atr_value, adx_value, executed, order_ticket
+            SELECT id, timestamp, symbol, signal_type, confidence, rsi_value, atr_value, adx_value,
+                   market_case, regime, anomaly_score, rr_ratio, reason, executed, order_ticket
             FROM bot_signals 
             ORDER BY timestamp DESC
             LIMIT 50;

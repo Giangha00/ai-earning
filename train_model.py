@@ -1,9 +1,20 @@
+"""
+Module train_model.py
+Hiện thực hóa CHƯƠNG 2, CHƯƠNG 4 & CHƯƠNG 5:
+- Huấn luyện mô hình phân loại dự đoán xác suất (Confidence Score) với ngưỡng >= 0.75 (75%).
+- Huấn luyện Gaussian HMM (3 States: Bullish, Bearish, High Volatility Chaos).
+- Huấn luyện Isolation Forest để phát hiện dữ liệu bất thường Out-of-Distribution (OOD).
+- Khởi tạo và lưu trữ đầy đủ trọng số chuẩn toán học theo Sổ tay thuật toán Bot AI.
+"""
+
 import logging
+from typing import List, Optional, Tuple, Dict, Any
 from pathlib import Path
 import joblib
 import lightgbm as lgb
 import numpy as np
 import pandas as pd
+from sklearn.ensemble import IsolationForest
 from sklearn.metrics import (
     accuracy_score,
     classification_report,
@@ -14,6 +25,11 @@ from sklearn.metrics import (
 )
 
 from config import BASE_DIR
+from ai_math_models import (
+    VectorizedLogisticRegression,
+    MarketHMMRegimeDetector,
+    OutOfDistributionFilter,
+)
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - [%(levelname)s] - %(message)s")
 
@@ -24,50 +40,37 @@ class ModelTrainer:
         self.models_dir = BASE_DIR / models_dir
         self.models_dir.mkdir(parents=True, exist_ok=True)
 
-        # Danh sách các cột KHÔNG dùng làm feature đầu vào
         self.ignore_cols = [
-            "time", "open", "high", "low", "close", "tick_volume", 
+            "time", "open", "high", "low", "close", "tick_volume",
             "spread", "real_volume", "target"
         ]
 
     def load_data(self) -> pd.DataFrame:
         logging.info(f"Đang nạp dataset từ {self.dataset_path}...")
         df = pd.read_parquet(self.dataset_path)
-        # Đảm bảo sắp xếp chuẩn theo thời gian
         df = df.sort_values(by=["time"]).reset_index(drop=True)
         return df
 
     def prepare_data(self, df: pd.DataFrame):
-        """Tách Features (X), Target (y) và phân chia theo Time-series Split."""
         features = [col for col in df.columns if col not in self.ignore_cols]
         X = df[features]
         y = df["target"]
 
-        logging.info(f"Tổng số features đưa vào huấn luyện: {len(features)}")
-        logging.info(f"Danh sách features: {features}")
-
+        logging.info(f"Tổng số features: {len(features)}")
         n = len(df)
         train_end = int(n * 0.70)
         val_end = int(n * 0.85)
 
-        # 1. Tập Train (70% đầu)
         X_train, y_train = X.iloc[:train_end], y.iloc[:train_end]
-        # 2. Tập Validation (15% tiếp theo để Early Stopping)
         X_val, y_val = X.iloc[train_end:val_end], y.iloc[train_end:val_end]
-        # 3. Tập Test OOS - Out Of Sample (15% cuối cùng để đánh giá khách quan)
         X_test, y_test = X.iloc[val_end:], y.iloc[val_end:]
 
-        logging.info(f"Kích thước tập Train:      {len(X_train):,} mẫu")
-        logging.info(f"Kích thước tập Validation: {len(X_val):,} mẫu")
-        logging.info(f"Kích thước tập Test (OOS): {len(X_test):,} mẫu")
-
+        logging.info(f"Train: {len(X_train):,} | Val: {len(X_val):,} | Test (OOS): {len(X_test):,}")
         return X_train, y_train, X_val, y_val, X_test, y_test, features
 
-    def train(self, X_train, y_train, X_val, y_val):
-        """Huấn luyện mô hình LightGBM với cơ chế Early Stopping."""
-        logging.info("Bắt đầu huấn luyện mô hình LightGBM...")
-
-        # Tính tỷ lệ mất cân bằng nhãn (class imbalance)
+    def train_classifier(self, X_train, y_train, X_val, y_val):
+        """Huấn luyện mô hình phân loại dự đoán xác suất thắng."""
+        logging.info("Huấn luyện mô hình LightGBM với tham số chuẩn hóa...")
         scale_pos_weight = (len(y_train) - sum(y_train)) / (sum(y_train) + 1e-9)
 
         params = {
@@ -87,34 +90,37 @@ class ModelTrainer:
             "verbose": -1,
         }
 
-        # Khởi tạo mô hình
         model = lgb.LGBMClassifier(**params, n_estimators=1000)
-
-        # Huấn luyện với early stopping (dừng nếu sau 50 vòng không cải thiện AUC trên tập val)
         callbacks = [
             lgb.early_stopping(stopping_rounds=50, verbose=False),
-            lgb.log_evaluation(period=100)
+            lgb.log_evaluation(period=100),
         ]
 
-        model.fit(
-            X_train,
-            y_train,
-            eval_set=[(X_val, y_val)],
-            callbacks=callbacks
-        )
-
-        logging.info(f"Huấn luyện hoàn tất! Vòng lặp tối ưu nhất: {model.best_iteration_}")
+        model.fit(X_train, y_train, eval_set=[(X_val, y_val)], callbacks=callbacks)
+        logging.info(f"Huấn luyện hoàn tất! Best iteration: {model.best_iteration_}")
         return model
 
-    def evaluate(self, model, X_test, y_test, threshold: float = 0.55):
-        """Đánh giá mô hình trên tập Test (dữ liệu tương lai mà mô hình chưa từng thấy)."""
-        logging.info(f"\n{'='*20} ĐÁNH GIÁ TRÊN TẬP TEST (OUT-OF-SAMPLE) {'='*20}")
+    def train_hmm(self, df: pd.DataFrame) -> MarketHMMRegimeDetector:
+        """Huấn luyện Gaussian HMM tách 3 trạng thái thị trường (Chương 2.6)."""
+        logging.info("Huấn luyện Gaussian HMM 3 trạng thái ẩn (Bullish, Bearish, High Volatility Chaos)...")
+        returns = df["close"].pct_change().fillna(0).values
+        hl_volatility = ((df["high"] - df["low"]) / df["close"]).fillna(0).values
 
-        # Lấy xác suất dự đoán nhãn 1 (Buy thắng)
+        detector = MarketHMMRegimeDetector(n_components=3, random_state=42)
+        detector.fit(returns, hl_volatility)
+        return detector
+
+    def train_ood_filter(self, X_train: pd.DataFrame, threshold: float = 0.75) -> OutOfDistributionFilter:
+        """Huấn luyện Isolation Forest phát hiện dữ liệu lạ OOD (Chương 4.3)."""
+        logging.info(f"Huấn luyện Isolation Forest OOD Filter với ngưỡng tự tin >= {threshold * 100:.1f}%...")
+        ood_filter = OutOfDistributionFilter(contamination=0.05, confidence_threshold=threshold)
+        ood_filter.fit(X_train.values)
+        return ood_filter
+
+    def evaluate(self, model, X_test, y_test, threshold: float = 0.75):
+        """Đánh giá theo CHƯƠNG 4.3 & 5: Ngưỡng tự tin chuẩn >= 0.75."""
+        logging.info(f"\n{'='*20} ĐÁNH GIÁ TRÊN TẬP TEST VỚI NGƯỠNG CONFIDENCE >= {threshold * 100:.1f}% {'='*20}")
         y_probs = model.predict_proba(X_test)[:, 1]
-        
-        # Áp dụng ngưỡng xác suất (Threshold):
-        # Chỉ vào lệnh khi AI tin tưởng xác suất thắng >= threshold
         y_pred = (y_probs >= threshold).astype(int)
 
         roc_auc = roc_auc_score(y_test, y_probs)
@@ -123,55 +129,60 @@ class ModelTrainer:
         f1 = f1_score(y_test, y_pred, zero_division=0)
         accuracy = accuracy_score(y_test, y_pred)
 
-        logging.info(f"Ngưỡng kích hoạt lệnh (Threshold): {threshold * 100:.1f}%")
+        logging.info(f"Số lệnh kích hoạt với ngưỡng >= {threshold * 100:.1f}%: {int(np.sum(y_pred)):,} lệnh")
         logging.info(f"ROC-AUC Score:  {roc_auc:.4f}")
-        logging.info(f"Precision:      {precision * 100:.2f}% (Trong các lệnh bot đánh, bao nhiêu % thực sự thắng)")
-        logging.info(f"Recall:         {recall * 100:.2f}% (Tỷ lệ bắt được cơ hội thắng trên toàn thị trường)")
+        logging.info(f"Precision:      {precision * 100:.2f}% (Tỷ lệ thắng thực tế trên các lệnh bot chọn)")
+        logging.info(f"Recall:         {recall * 100:.2f}%")
         logging.info(f"F1-Score:       {f1:.4f}")
         logging.info(f"Accuracy:       {accuracy * 100:.2f}%")
 
-        print("\nChi tiết Classification Report:")
-        print(classification_report(y_test, y_pred, digits=4, zero_division=0))
-
-        # Hiển thị Top 10 Features quan trọng nhất
-        importance_df = pd.DataFrame({
-            "feature": X_test.columns,
-            "importance": model.feature_importances_
-        }).sort_values(by="importance", ascending=False)
-
-        print("\nTop 10 chỉ báo/features ảnh hưởng nhiều nhất đến quyết định của AI:")
-        print(importance_df.head(10).to_string(index=False))
-
         return y_probs
 
-    def save(self, model, features):
-        """Lưu model và danh sách features vào file."""
+    def save_full_pipeline(
+        self,
+        model,
+        features: List[str],
+        hmm_detector: MarketHMMRegimeDetector,
+        ood_filter: OutOfDistributionFilter,
+    ):
+        """Lưu toàn bộ pipeline AI bao gồm Model + Features + HMM + OOD Filter."""
         model_path = self.models_dir / "lgbm_forex_model.pkl"
         payload = {
             "model": model,
-            "features": features
+            "features": features,
+            "hmm_detector": hmm_detector,
+            "ood_filter": ood_filter,
+            "confidence_threshold": 0.75,
+            "version": "2.0.0_DeepQuant",
         }
         joblib.dump(payload, model_path)
-        logging.info(f"Đã lưu mô hình thành công vào: {model_path}")
+        logging.info(f"Đã lưu toàn bộ pipeline AI (Model + HMM + OOD) vào: {model_path}")
 
 
 def main():
     dataset_file = BASE_DIR / "data" / "processed_dataset.parquet"
     if not dataset_file.exists():
-        logging.error(f"Không tìm thấy file {dataset_file}. Hãy chạy feature_engineering.py trước.")
+        logging.error(f"Không tìm thấy file {dataset_file}.")
         return
 
     trainer = ModelTrainer(dataset_path=dataset_file)
     df = trainer.load_data()
     X_train, y_train, X_val, y_val, X_test, y_test, features = trainer.prepare_data(df)
 
-    model = trainer.train(X_train, y_train, X_val, y_val)
-    
-    # Đánh giá với ngưỡng xác suất vào lệnh 0.55 (chỉ đánh khi AI tự tin trên 55%)
-    trainer.evaluate(model, X_test, y_test, threshold=0.55)
-    
-    # Lưu mô hình
-    trainer.save(model, features)
+    # 1. Huấn luyện Classifier
+    model = trainer.train_classifier(X_train, y_train, X_val, y_val)
+
+    # 2. Huấn luyện HMM Regime Detector
+    hmm_detector = trainer.train_hmm(df)
+
+    # 3. Huấn luyện Isolation Forest OOD Filter
+    ood_filter = trainer.train_ood_filter(X_train, threshold=0.75)
+
+    # 4. Đánh giá với ngưỡng chuẩn >= 0.75
+    trainer.evaluate(model, X_test, y_test, threshold=0.75)
+
+    # 5. Lưu toàn bộ pipeline
+    trainer.save_full_pipeline(model, features, hmm_detector, ood_filter)
 
 
 if __name__ == "__main__":

@@ -12,10 +12,13 @@ pandas-ta>=0.3.14b0
 lightgbm>=4.0.0
 scikit-learn>=1.3.0
 joblib>=1.3.0
+hmmlearn>=0.3.0
 
-# Web Dashboard
+# Web Dashboard & Realtime Streaming
 fastapi>=0.110.0
 uvicorn>=0.28.0
+websockets>=12.0
+wsproto>=1.2.0
 
 # Visualization & Backtesting
 matplotlib>=3.8.0

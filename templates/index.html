@@ -14,7 +14,7 @@
       <div class="logo-icon">AI</div>
       <div class="logo-text">
         <h1>AI EARNING TERMINAL</h1>
-        <span>Quantitative Trading & Analysis</span>
+        <span>Deep Learning & Price Action Quantitative Engine</span>
       </div>
     </div>
 
@@ -22,9 +22,12 @@
       <div class="rate-badge">
         <span id="header-rate-display">Tỷ giá: 1 USD ≈ 25,870 ₫</span>
       </div>
-      <div id="connection-badge" class="status-badge simulation">
+      <div class="rate-badge" style="border-color: rgba(6, 182, 212, 0.4); background: rgba(6, 182, 212, 0.08);">
+        <span id="header-live-tick" style="color: #06b6d4; font-weight: 700;">EURUSD: 1.08500</span>
+      </div>
+      <div id="connection-badge" class="status-badge connected">
         <span class="pulse-dot"></span>
-        <span id="connection-text">Đang kết nối...</span>
+        <span id="connection-text">Đang kết nối Realtime...</span>
       </div>
       <button id="btn-refresh" class="btn-refresh" title="Làm mới dữ liệu">
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21.5 2v6h-6M21.34 15.57a10 10 0 1 1-.57-8.38l5.67-5.67"/></svg>
@@ -32,6 +35,70 @@
       </button>
     </div>
   </header>
+
+  <!-- AI Brain & Market Cases Realtime HUD Banner -->
+  <div class="ai-hud-container">
+    <div class="ai-hud-card">
+      <div class="ai-hud-header">
+        <div class="ai-hud-title">
+          <span class="hud-pulse"></span>
+          <strong>BỘ ĐIỀU PHỐI AI & 6 KỊCH BẢN THỊ TRƯỜNG (CHƯƠNG 1 - 5)</strong>
+        </div>
+        <div class="ai-hud-tags">
+          <span class="hud-tag" id="hud-ws-status">🟢 WEBSOCKET REALTIME</span>
+          <span class="hud-tag" id="hud-last-update">Cập nhật: --</span>
+        </div>
+      </div>
+
+      <div class="ai-hud-grid">
+        <!-- 1. Kịch bản thị trường hiện tại -->
+        <div class="ai-metric-box">
+          <span class="metric-label">Kịch bản Thị Trường (Case A-F)</span>
+          <div class="metric-val" id="hud-market-case">
+            <span class="badge badge-case-a">CASE A: TREND MƯỢT</span>
+          </div>
+          <span class="metric-desc" id="hud-case-reason">Đang quét cấu trúc Đỉnh/Đáy & Căn cứ Bò Gấu...</span>
+        </div>
+
+        <!-- 2. Gaussian HMM Regime -->
+        <div class="ai-metric-box">
+          <span class="metric-label">HMM Market Regime (K=3)</span>
+          <div class="metric-val" id="hud-hmm-regime">
+            <span class="text-green" style="font-weight: 700;">BULLISH (Phe Bò)</span>
+          </div>
+          <span class="metric-desc" id="hud-hmm-desc">Bóc tách 3 trạng thái ẩn (Bull / Bear / High Volatility)</span>
+        </div>
+
+        <!-- 3. Màng Lọc Chống Nhiễu OOD (Isolation Forest) -->
+        <div class="ai-metric-box">
+          <span class="metric-label">Chống Nhiễu OOD (Isolation Forest)</span>
+          <div class="metric-val" id="hud-ood-status">
+            <span class="text-cyan" style="font-weight: 700;">🛡️ AN TOÀN (Dữ liệu chuẩn)</span>
+          </div>
+          <span class="metric-desc" id="hud-ood-score">Anomaly Score: 0.000 (Ngưỡng OOD: 0.05)</span>
+        </div>
+
+        <!-- 4. Cầu Dao 24H (LOCK_BOT_24H) -->
+        <div class="ai-metric-box">
+          <span class="metric-label">Cầu Dao Ngắt Mạch 24H (2R Loss)</span>
+          <div class="metric-val" id="hud-circuit-breaker">
+            <span class="text-green" style="font-weight: 700;">HOẠT ĐỘNG (0/2 Lỗ)</span>
+          </div>
+          <span class="metric-desc" id="hud-circuit-desc">Khóa bot 24h nếu lỗ liên tiếp 2 lệnh hoặc chạm 2R</span>
+        </div>
+
+        <!-- 5. Độ Tin Cậy & Monte Carlo VaR -->
+        <div class="ai-metric-box">
+          <span class="metric-label">Độ Tin Cậy AI & Monte Carlo VaR</span>
+          <div class="metric-val">
+            <span class="text-gold" id="hud-confidence" style="font-weight: 700;">75.0%</span>
+            <span style="font-size: 11px; color: var(--text-muted); margin-left: 6px;">| VaR 95%: <strong class="text-cyan" id="hud-var95">$0.00</strong></span>
+          </div>
+          <span class="metric-desc">Ngưỡng vào lệnh: &ge; 75.0% (Chương 4.3 & 5)</span>
+        </div>
+      </div>
+    </div>
+  </div>
 
   <!-- Main 2-Column Trading Workspace -->
   <div class="trading-workspace">
@@ -42,9 +109,10 @@
         <!-- Toolbar -->
         <div class="chart-toolbar">
           <div class="toolbar-left">
-            <div class="symbol-badge">
+            <div class="symbol-badge" id="btn-open-markets" style="cursor: pointer;" title="Nhấn để xem toàn bộ 355 thị trường Exness">
               <span id="active-symbol">EURUSD</span>
               <span class="text-cyan" id="active-tf" style="font-size: 13px;">M5</span>
+              <span class="markets-badge-count">🌐 355 Mã</span>
             </div>
 
             <div class="timeframe-group">
@@ -96,9 +164,15 @@
       <!-- 2. Dưới Chart: Tổng số dư trong ví dạng VNĐ -->
       <section class="wallet-hero-card">
         <div class="wallet-main-col">
-          <div class="wallet-label">
-            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="4" width="20" height="16" rx="2"/><line x1="2" y1="10" x2="22" y2="10"/><circle cx="16" cy="15" r="1.5"/></svg>
-            Tổng Số Dư Khả Dụng Trong Ví (VNĐ)
+          <div class="wallet-label" style="display: flex; justify-content: space-between; align-items: center; width: 100%;">
+            <div style="display: flex; align-items: center; gap: 8px;">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="4" width="20" height="16" rx="2"/><line x1="2" y1="10" x2="22" y2="10"/><circle cx="16" cy="15" r="1.5"/></svg>
+              Tổng Số Dư Khả Dụng Trong Ví (VNĐ)
+            </div>
+            <button id="btn-sync-balance" class="btn-sync-wallet" title="Cập nhật số dư đúng tài khoản Exness của bạn">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>
+              ⚙️ Đồng Bộ Số Dư Exness
+            </button>
           </div>
           <div class="wallet-vnd-amount" id="wallet-balance-vnd">0 ₫</div>
           <div class="wallet-sub-row">
@@ -131,7 +205,7 @@
         <div class="order-entry-header">
           <h3>
             <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2v20M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"/></svg>
-            Bảng Thiết Lập Đặt Lệnh & Tính Toán Lợi Nhuận
+            Bảng Thiết Lập Đặt Lệnh & Tính Toán Lợi Nhuận (Chuẩn R:R &ge; 1.5)
           </h3>
           <span class="text-muted" style="font-size: 12px;">Cặp: <strong>EURUSD</strong></span>
         </div>
@@ -159,7 +233,7 @@
           <!-- Input 2: Số lot -->
           <div class="form-group">
             <label for="input-lot-size">
-              <span>Số lot (Khối lượng)</span>
+              <span>Số lot (Khối lượng 1R)</span>
               <span class="text-cyan">Volume</span>
             </label>
             <input type="number" step="0.01" min="0.01" max="100.0" id="input-lot-size" class="form-input" placeholder="0.10" value="0.10">
@@ -192,11 +266,11 @@
           </div>
         </div>
 
-        <!-- Khung hiển thị lợi nhuận ước tính thời gian thực -->
+        <!-- Khung hiển thị lợi nhuận ước tính thời gian thực & Tỷ lệ R:R -->
         <div class="calc-profit-box">
           <div class="calc-profit-title">
-            <span>Lợi nhuận mục tiêu mong muốn kiếm được:</span>
-            <div id="calc-pips-dist" style="color: var(--color-cyan); font-weight: 600; margin-top: 2px;">-- pips</div>
+            <span>Lợi nhuận mục tiêu & Tỷ lệ R:R:</span>
+            <div id="calc-pips-dist" style="color: var(--color-cyan); font-weight: 600; margin-top: 2px;">-- pips | R:R: 1:2.0</div>
           </div>
           <div class="calc-profit-values">
             <div>Tiền lời VNĐ: <span class="calc-vnd" id="calc-profit-vnd">-- ₫</span></div>
@@ -275,12 +349,13 @@
               <th>Thời gian</th>
               <th>Mã</th>
               <th>Tín hiệu</th>
+              <th>Kịch bản (Case)</th>
+              <th>HMM Regime</th>
               <th>Độ tin cậy</th>
-              <th>RSI</th>
-              <th>ATR</th>
-              <th>ADX</th>
+              <th>R:R</th>
               <th>Trạng thái</th>
               <th>Vé lệnh</th>
+              <th>Lý do kích hoạt / Bỏ qua</th>
             </tr>
           </thead>
           <tbody id="tbody-signals"></tbody>
@@ -325,6 +400,74 @@
       </div>
     </div>
   </section>
+
+  <!-- 1. MODAL: DANH MỤC 355 THỊ TRƯỜNG EXNESS MT5 -->
+  <div id="markets-modal" class="modal-overlay hidden">
+    <div class="markets-modal-card">
+      <div class="modal-header">
+        <div class="modal-title-wrap">
+          <div class="modal-title">
+            <span>🌐</span>
+            <span>Danh Mục 355 Thị Trường Exness (MT5 API)</span>
+          </div>
+          <span class="modal-subtitle">Broker: Exness-MT5Trial7 • Đồng bộ từ MetaTrader 5 API • Nhấn vào mã bất kỳ để mở biểu đồ</span>
+        </div>
+        <button class="modal-close-btn" id="btn-close-markets">&times;</button>
+      </div>
+
+      <div class="modal-controls">
+        <input type="text" id="markets-search-input" class="markets-search-input" placeholder="🔍 Tìm kiếm nhanh mã thị trường (Ví dụ: XAU, BTC, EUR, US30, AAPL, Dầu...)" autocomplete="off">
+        <div class="markets-cat-tabs">
+          <button class="cat-tab-btn active" data-cat="all">Tất cả (355)</button>
+          <button class="cat-tab-btn" data-cat="forex">Tiền tệ Forex (107)</button>
+          <button class="cat-tab-btn" data-cat="metals_energy">Kim loại & Năng lượng (14)</button>
+          <button class="cat-tab-btn" data-cat="crypto">Tiền điện tử / Crypto (36)</button>
+          <button class="cat-tab-btn" data-cat="indices">Chỉ số chứng khoán (12)</button>
+          <button class="cat-tab-btn" data-cat="stocks">Cổ phiếu Mỹ (186)</button>
+        </div>
+      </div>
+
+      <div class="markets-list-body" id="markets-list-body">
+        <!-- Render động từ API /api/markets -->
+      </div>
+    </div>
+  </div>
+
+  <!-- 2. MODAL: ĐỒNG BỘ SỐ DƯ TÀI KHOẢN VÍ EXNESS -->
+  <div id="balance-modal" class="modal-overlay hidden">
+    <div class="balance-modal-card">
+      <div class="modal-header">
+        <div class="modal-title-wrap">
+          <div class="modal-title">
+            <span>💰</span>
+            <span>Đồng Bộ Số Dư Ví Exness Thử Nghiệm</span>
+          </div>
+          <span class="modal-subtitle">Tài khoản Exness Trial #434439423</span>
+        </div>
+        <button class="modal-close-btn" id="btn-close-balance">&times;</button>
+      </div>
+
+      <form id="form-sync-balance" class="balance-sync-body">
+        <div class="balance-sync-desc">
+          Nhập số dư tài khoản thử nghiệm của bạn trên ứng dụng hoặc web Exness để hệ thống quy đổi chính xác sang VNĐ và tự động áp dụng công thức <strong>quản trị rủi ro 1R (1% vốn)</strong>.
+        </div>
+
+        <div class="balance-input-wrap">
+          <label for="input-sync-balance-usd">Số dư tài khoản (USD):</label>
+          <input type="number" id="input-sync-balance-usd" class="balance-input-field" step="any" min="0" placeholder="Ví dụ: 1000, 5000, 10000" required>
+        </div>
+
+        <div class="balance-vnd-preview">
+          <span>Quy đổi sang VNĐ (tỷ giá thực tế):</span>
+          <strong id="sync-balance-vnd-preview" class="text-gold">0 ₫</strong>
+        </div>
+
+        <button type="submit" class="balance-btn-submit" id="btn-submit-sync-balance">
+          💾 Xác Nhận & Cập Nhật Số Dư
+        </button>
+      </form>
+    </div>
+  </div>
 
   <!-- Toast Notification Container -->
   <div id="toast-notice" class="toast-notice"></div>

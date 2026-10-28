@@ -13,21 +13,73 @@ try:
 except (ImportError, ModuleNotFoundError):
     IS_SIMULATION = True
     import numpy as np
+    import exness_markets
+    from db import get_setting
 
     class MockAccountInfo:
-        def __init__(self, login: int, server: str):
+        def __init__(self, login: int, server: str, balance: float = None):
             self.login = login
-            self.name = "Demo Trader (Chế độ giả lập macOS)"
+            self.name = f"Tài khoản Exness Trial #{login}"
             self.server = server
-            self.balance = 10000.0
-            self.equity = 10000.0
+            if balance is not None:
+                self.balance = float(balance)
+            else:
+                saved = get_setting("account_balance")
+                self.balance = float(saved) if saved else getattr(config, "MT5_BALANCE", 10000.0)
+            self.equity = self.balance
             self.currency = "USD"
             self.leverage = 100
+            self.margin_level = 500.0
 
     class MockSymbolInfo:
         def __init__(self, symbol: str):
+            info = exness_markets.get_market_by_symbol(symbol)
             self.name = symbol
+            self.description = info.get("name", symbol)
+            self.category = info.get("category", "Forex")
             self.visible = True
+            self.digits = info.get("digits", 5)
+            self.point = info.get("point", 0.00001)
+            self.spread = info.get("spread", 15)
+            self.trade_tick_size = self.point
+            self.trade_tick_value = 1.0
+            self.volume_min = 0.01
+            self.volume_max = 100.0
+            self.volume_step = 0.01
+            self.bid = info.get("base", 1.1260)
+            self.ask = round(self.bid + self.spread * self.point, self.digits)
+            self.last = self.ask
+
+    class MockTick:
+        def __init__(self, symbol: str = "EURUSD"):
+            is_gold = "XAU" in symbol or "GOLD" in symbol
+            base = 2650.0 if is_gold else 1.1260
+            spread = 0.30 if is_gold else 0.00015
+            self.bid = base
+            self.ask = round(base + spread, 2 if is_gold else 5)
+            self.last = self.ask
+            self.volume = 100
+            self.time = int(time.time())
+
+    class MockPosition:
+        def __init__(self, ticket: int, symbol: str, p_type: int, volume: float, price_open: float, sl: float, tp: float, magic: int = 888888, comment: str = ""):
+            self.ticket = ticket
+            self.symbol = symbol
+            self.type = p_type
+            self.volume = volume
+            self.price_open = price_open
+            self.price_current = price_open
+            self.sl = sl
+            self.tp = tp
+            self.magic = magic
+            self.comment = comment
+
+    class MockOrderResult:
+        def __init__(self, retcode: int, order: int, price: float, comment: str = "Request executed"):
+            self.retcode = retcode
+            self.order = order
+            self.price = price
+            self.comment = comment
 
     class MockMT5:
         """Bộ giả lập MT5 khi chạy trên macOS / Linux hoặc môi trường không cài MT5 Windows."""
@@ -39,6 +91,107 @@ except (ImportError, ModuleNotFoundError):
         TIMEFRAME_H4 = 16388
         TIMEFRAME_D1 = 16408
 
+        # Retcodes
+        TRADE_RETCODE_DONE = 10009
+        TRADE_RETCODE_REQUOTE = 10004
+        TRADE_RETCODE_REJECT = 10006
+        TRADE_RETCODE_PRICE_OFF = 10008
+        TRADE_RETCODE_INVALID_PRICE = 10015
+        TRADE_RETCODE_INVALID_STOPS = 10016
+        TRADE_RETCODE_INVALID_VOLUME = 10014
+        TRADE_RETCODE_MARKET_CLOSED = 10018
+        TRADE_RETCODE_NO_MONEY = 10019
+        TRADE_RETCODE_TRADE_DISABLED = 10017
+
+        # Actions & Types
+        TRADE_ACTION_DEAL = 1
+        ORDER_TYPE_BUY = 0
+        ORDER_TYPE_SELL = 1
+        POSITION_TYPE_BUY = 0
+        POSITION_TYPE_SELL = 1
+        ORDER_TIME_GTC = 0
+        ORDER_FILLING_IOC = 1
+        ORDER_FILLING_FOK = 0
+
+        _positions = {}
+        _ticket_counter = 1000000
+        _last_prices = {"EURUSD": 1.12600, "XAUUSD": 2650.50}
+
+        @classmethod
+        def set_symbol_price(cls, symbol: str, price: float):
+            """Đồng bộ mức giá khởi tạo từ dữ liệu nến thực tế để tránh nhảy gáp."""
+            is_gold = "XAU" in symbol or "GOLD" in symbol
+            key = "XAUUSD" if is_gold else "EURUSD"
+            cls._last_prices[key] = round(float(price), 2 if is_gold else 5)
+
+        @classmethod
+        def symbol_info_tick(cls, symbol: str):
+            is_gold = "XAU" in symbol or "GOLD" in symbol
+            key = "XAUUSD" if is_gold else "EURUSD"
+            prev_price = cls._last_prices.get(key, 2650.0 if is_gold else 1.12600)
+
+            # Mô phỏng biến động tick ngẫu nhiên sinh động (Brownian motion micro-ticks)
+            volatility = 0.20 if is_gold else 0.00008
+            drift = float(np.random.normal(0, volatility))
+            new_price = round(prev_price + drift, 2 if is_gold else 5)
+            cls._last_prices[key] = new_price
+
+            spread = 0.30 if is_gold else 0.00015
+            tick = MockTick(symbol)
+            tick.bid = new_price
+            tick.ask = round(new_price + spread, 2 if is_gold else 5)
+            tick.last = tick.ask
+            tick.time = int(time.time())
+            return tick
+
+        @classmethod
+        def order_send(cls, request: dict):
+            action = request.get("action")
+            if action == cls.TRADE_ACTION_DEAL:
+                # Nếu đóng lệnh (truyền ticket vị thế qua tham số position)
+                pos_ticket = request.get("position")
+                if pos_ticket is not None:
+                    if pos_ticket in cls._positions:
+                        pos = cls._positions.pop(pos_ticket)
+                        return MockOrderResult(cls.TRADE_RETCODE_DONE, pos_ticket, request.get("price", pos.price_open), "Position closed")
+                    return MockOrderResult(cls.TRADE_RETCODE_REJECT, 0, 0.0, "Position not found")
+
+                # Mở lệnh mới
+                cls._ticket_counter += 1
+                ticket = cls._ticket_counter
+                symbol = request.get("symbol", "EURUSD")
+                p_type = request.get("type", cls.ORDER_TYPE_BUY)
+                volume = request.get("volume", 0.01)
+                price = request.get("price", 1.0850)
+                sl = request.get("sl", 0.0)
+                tp = request.get("tp", 0.0)
+                magic = request.get("magic", 888888)
+                comment = request.get("comment", "")
+
+                pos = MockPosition(ticket, symbol, p_type, volume, price, sl, tp, magic, comment)
+                cls._positions[ticket] = pos
+                return MockOrderResult(cls.TRADE_RETCODE_DONE, ticket, price, "Request executed")
+
+            return MockOrderResult(cls.TRADE_RETCODE_REJECT, 0, 0.0, "Action not supported")
+
+        @classmethod
+        def positions_get(cls, ticket=None, symbol=None, group=None):
+            if ticket is not None:
+                if ticket in cls._positions:
+                    return (cls._positions[ticket],)
+                return ()
+            positions = list(cls._positions.values())
+            if symbol is not None:
+                positions = [p for p in positions if p.symbol == symbol]
+            return tuple(positions)
+
+        _account_balance: float = None
+
+        @classmethod
+        def set_balance(cls, balance: float):
+            """Cập nhật số dư tài khoản thực tế từ Exness."""
+            cls._account_balance = float(balance)
+
         @staticmethod
         def initialize(**kwargs) -> bool:
             return True
@@ -47,9 +200,22 @@ except (ImportError, ModuleNotFoundError):
         def login(login: int, password: str, server: str) -> bool:
             return True
 
+        @classmethod
+        def account_info(cls):
+            return MockAccountInfo(config.MT5_LOGIN, config.MT5_SERVER, cls._account_balance)
+
         @staticmethod
-        def account_info():
-            return MockAccountInfo(config.MT5_LOGIN, config.MT5_SERVER)
+        def symbols_total() -> int:
+            """Tổng số lượng thị trường trên sàn Exness."""
+            return len(exness_markets.ALL_EXNESS_MARKETS)
+
+        @staticmethod
+        def symbols_get(group: str = None) -> tuple:
+            """Trả về toàn bộ danh sách thị trường có sẵn trên Exness."""
+            all_syms = exness_markets.ALL_EXNESS_MARKETS
+            if group:
+                all_syms = [m for m in all_syms if group.lower() in m.get("category", "").lower()]
+            return tuple(MockSymbolInfo(m["symbol"]) for m in all_syms)
 
         @staticmethod
         def symbol_info(symbol: str):
@@ -74,9 +240,20 @@ except (ImportError, ModuleNotFoundError):
             )
             timestamps = now - np.arange(count, 0, -1, dtype=np.int64) * step_seconds
             
-            # Base price tùy cặp
-            base_price = 2650.0 if "XAU" in symbol or "GOLD" in symbol else 1.0850
-            volatility = 0.5 if "XAU" in symbol or "GOLD" in symbol else 0.0003
+            # Base price & biến động theo đúng loại tài sản Exness
+            info = exness_markets.get_market_by_symbol(symbol)
+            base_price = float(info.get("base", 1.1260))
+            cat = info.get("category", "")
+            if cat == "Crypto":
+                volatility = base_price * 0.0008
+            elif cat == "Kim loại & Dầu":
+                volatility = base_price * 0.0004
+            elif cat == "Chỉ số":
+                volatility = base_price * 0.0003
+            elif cat == "Cổ phiếu":
+                volatility = base_price * 0.0008
+            else:
+                volatility = 0.0002
 
             returns = np.random.normal(0, volatility, count)
             close_p = base_price + np.cumsum(returns)
@@ -136,6 +313,8 @@ except (ImportError, ModuleNotFoundError):
             return (0, "Success (Simulation)")
 
     mt5 = MockMT5()
+    import sys
+    sys.modules.setdefault("MetaTrader5", mt5)
 
 
 class MT5Connector:

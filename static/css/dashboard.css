@@ -331,6 +331,7 @@ body {
   margin-bottom: 6px;
 }
 
+.wallet-usd-amount,
 .wallet-vnd-amount {
   font-size: 36px;
   font-weight: 800;

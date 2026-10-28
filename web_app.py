@@ -59,6 +59,7 @@ class OrderPlaceRequest(BaseModel):
     target_price: Optional[float] = None
     target_price_vnd: Optional[float] = None
     target_profit_vnd: Optional[float] = None
+    target_profit_usd: Optional[float] = None
     stop_loss: Optional[float] = None
 
 
@@ -434,9 +435,12 @@ def place_order(req: OrderPlaceRequest):
 
     mult = 100.0 if "XAU" in req.symbol or "GOLD" in req.symbol else 100000.0
 
-    # Xác định target_price (Forex)
+    # Xác định target_price
     if req.target_price and req.target_price > 0:
         target_price = float(req.target_price)
+    elif req.target_profit_usd and req.target_profit_usd > 0:
+        diff = float(req.target_profit_usd) / (mult * req.lot_size)
+        target_price = entry_price + diff if req.order_type.upper() == "BUY" else entry_price - diff
     elif req.target_price_vnd and req.target_price_vnd > 0:
         target_price = float(req.target_price_vnd) / USD_VND_RATE
     elif req.target_profit_vnd and req.target_profit_vnd > 0:
@@ -482,10 +486,10 @@ def place_order(req: OrderPlaceRequest):
         cursor.execute("""
             INSERT INTO orders 
             (ticket_id, symbol, order_type, lot_size, open_time, open_price, stop_loss, take_profit, profit, status, market_case, rr_ratio)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'OPEN', ?, ?);
-        """, (ticket_id, req.symbol, req.order_type.upper(), req.lot_size, open_time, entry_price, sl_price, target_price, 0.0, current_case, calc_rr))
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0.0, 'OPEN', ?, ?);
+        """, (ticket_id, req.symbol, req.order_type.upper(), req.lot_size, open_time, entry_price, sl_price, target_price, current_case, calc_rr))
 
-        msg = f"Đã vào lệnh {req.order_type.upper()} #{ticket_id} {req.lot_size} lot {req.symbol} tại giá {entry_price_vnd:,.0f} ₫ ({entry_price:.5f}), TP {target_price_vnd:,.0f} ₫ ({target_price:.5f}) - Dự kiến lãi: +{expected_profit_vnd:,.0f} ₫ (R:R 1:{calc_rr:.2f})"
+        msg = f"Đã vào lệnh {req.order_type.upper()} #{ticket_id} {req.lot_size} lot {req.symbol} tại giá {entry_price:.5f}, TP {target_price:.5f} - Dự kiến lãi: +${expected_profit_usd:.2f} USD (R:R 1:{calc_rr:.2f})"
         cursor.execute("INSERT INTO bot_logs (log_level, module, message) VALUES ('INFO', 'order_entry', ?);", (msg,))
 
         cursor.execute("""
@@ -608,6 +612,20 @@ def list_parquet_files():
             "modified": mtime
         })
     return results
+
+
+@app.post("/api/data/clean")
+def clean_sample_data():
+    """Xóa sạch toàn bộ dữ liệu mẫu trong orders, bot_signals, bot_logs, daily_equity."""
+    with get_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("DELETE FROM orders;")
+        cursor.execute("DELETE FROM bot_signals;")
+        cursor.execute("DELETE FROM bot_logs;")
+        cursor.execute("DELETE FROM daily_equity;")
+        cursor.execute("DELETE FROM sqlite_sequence WHERE name IN ('orders', 'bot_signals', 'bot_logs');")
+        conn.commit()
+    return {"status": "success", "message": "Đã làm sạch toàn bộ dữ liệu mẫu"}
 
 
 if __name__ == "__main__":

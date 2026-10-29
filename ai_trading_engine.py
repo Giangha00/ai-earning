@@ -21,15 +21,57 @@ import pandas as pd
 import pandas_ta as ta
 from fastapi import WebSocket
 
+import time
+import config as config_module
 from config import BASE_DIR, config
 from db import get_connection
 from mt5_connector import mt5, MT5Connector, IS_SIMULATION
-from executor import MT5Executor
+from executor import MT5Executor, close_all_positions
 from risk_manager import RiskManager
 from ai_price_action import PriceActionAnalyzer, MarketCase, TradeAction, MarketAnalysisResult
 from ai_math_models import MarketHMMRegimeDetector, OutOfDistributionFilter, MonteCarloRiskEstimator
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - [%(levelname)s] - %(message)s")
+
+DEFAULT_USD_VND_RATE = 25870.0
+
+
+def get_account_balance(usd_vnd_rate: float = DEFAULT_USD_VND_RATE) -> Dict[str, float]:
+    """
+    Lấy thông tin Balance và Equity thực tế gồm cả lệnh đang chạy (theo đơn vị chuẩn USD).
+    Phục vụ kiểm tra Cầu dao chốt lời tổng (Target Profit Circuit Breaker - v2).
+    """
+    acc = mt5.account_info() if mt5 else None
+    balance_usd = float(getattr(acc, "balance", getattr(config, "MT5_BALANCE", 1000.0)))
+
+    floating_pnl_usd = 0.0
+    try:
+        with get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT symbol, order_type, lot_size, open_price FROM orders WHERE status = 'OPEN';"
+            )
+            for sym, o_type, lot, o_price in cursor.fetchall():
+                tick = mt5.symbol_info_tick(sym)
+                if tick is None:
+                    continue
+                cur_p = float(tick.bid if o_type == "BUY" else tick.ask)
+                mult = 100.0 if "XAU" in sym or "GOLD" in sym else 100000.0
+                pnl = (cur_p - o_price) * mult * lot if o_type == "BUY" else (o_price - cur_p) * mult * lot
+                floating_pnl_usd += pnl
+    except Exception:
+        pass
+
+    equity_usd = balance_usd + floating_pnl_usd
+
+    return {
+        "balance": balance_usd,
+        "equity": equity_usd,
+        "balance_usd": balance_usd,
+        "equity_usd": equity_usd,
+        "floating_pnl_usd": floating_pnl_usd,
+        "floating_pnl_vnd": floating_pnl_usd * usd_vnd_rate,
+    }
 
 
 class AITradingEngine:
@@ -48,6 +90,7 @@ class AITradingEngine:
         self.symbol: str = "EURUSD"
         self.timeframe_str: str = "M5"
         self.is_running: bool = False
+        self.target_reached_triggered: bool = False
         self.loop_interval_sec: float = 1.5  # Chu kỳ quét nhịp realtime (1.5s)
 
         # 1. Quản lý Rủi ro (Chương 3.1, 4.4, 5)
@@ -324,12 +367,14 @@ class AITradingEngine:
             logging.info(f"[{symbol}] Bỏ qua lệnh: {rr_msg}")
             return
 
-        # Tính toán Lot Size cố định 1R (1.0% vốn)
-        lot_size, one_r_money, _ = self.risk_manager.calculate_lot_size_1r(
+        # Ưu tiên sử dụng Số Lot cố định do người dùng chỉ định (Custom Lot Size - v2)
+        custom_lot = self.risk_manager.get_execution_lot()
+        _, one_r_money, _ = self.risk_manager.calculate_lot_size_1r(
             symbol=symbol,
             entry_price=entry_price,
             sl_price=sl_price,
         )
+        lot_size = custom_lot if custom_lot > 0 else 0.01
 
         if lot_size <= 0:
             logging.warning(f"[{symbol}] Lot size tính toán không hợp lệ ({lot_size}).")
@@ -421,6 +466,16 @@ class AITradingEngine:
                     one_r = 10000.0 * 0.01
                     self.risk_manager.record_trade_result(profit, one_r)
 
+                    # Cộng/trừ lợi nhuận thực tế vào số dư tài khoản
+                    acc = mt5.account_info()
+                    if acc is not None:
+                        from db import set_setting
+                        new_bal = round(float(acc.balance) + profit, 2)
+                        config.MT5_BALANCE = new_bal
+                        set_setting("account_balance", str(new_bal))
+                        if hasattr(mt5, "set_balance"):
+                            mt5.set_balance(new_bal)
+
                     cursor.execute("INSERT INTO bot_logs (log_level, module, message) VALUES ('INFO', 'order_close', ?);",
                                    (f"Lệnh #{ticket} đã chốt ({reason}) tại {current_price:.5f}, Lợi nhuận: ${profit:.2f}",))
 
@@ -444,10 +499,56 @@ class AITradingEngine:
         # Cập nhật floating PnL của các lệnh đang chạy
         floating_pnl = await self.update_open_positions_pnl(current_price)
 
-        # Thông tin tài khoản
+        # Thông tin tài khoản (USD)
         acc = mt5.account_info()
         balance = float(getattr(acc, "balance", 10000.0))
         equity = balance + floating_pnl
+        current_equity_vnd = equity * DEFAULT_USD_VND_RATE
+
+        # 1. KIỂM TRA CẦU DAO CHỐT LỜI TỔNG (TARGET CIRCUIT BREAKER - Chương 3.3 v2 - Đơn vị USD)
+        bot_running = bool(getattr(config, "BOT_RUNNING", False))
+        if bot_running and self.risk_manager.is_target_goal_reached(equity):
+            msg_close = "⚡ Tiến hành đóng toàn bộ vị thế đang mở để chốt bằng đúng số tiền mục tiêu..."
+            msg_stop = "🛑 BOT ĐÃ TỰ ĐỘNG DỪNG HOÀN TOÀN TẠI MỨC MỤC TIÊU!"
+            print(msg_close)
+            logging.info(msg_close)
+            close_all_positions()
+            config.BOT_RUNNING = False
+            config_module.BOT_RUNNING = False
+            bot_running = False
+            self.target_reached_triggered = True
+            print(msg_stop)
+            logging.info(msg_stop)
+
+            # Cập nhật lại số dư sau khi đóng toàn bộ lệnh
+            acc_after = mt5.account_info()
+            balance = float(getattr(acc_after, "balance", equity))
+            floating_pnl = 0.0
+            equity = balance
+            current_equity_vnd = equity * DEFAULT_USD_VND_RATE
+
+            with get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute(
+                    "INSERT INTO bot_logs (log_level, module, message) VALUES ('INFO', 'target_breaker', ?);",
+                    (
+                        f"🎯 [TARGET REACHED] Equity ${equity:,.2f} USD >= Mục tiêu ${config.TARGET_PROFIT_GOAL:,.2f} USD. "
+                        f"Đã đóng toàn bộ vị thế trên sàn MT5/Exness và tự động ngắt Bot!",
+                    ),
+                )
+                conn.commit()
+
+            await self.broadcast({
+                "type": "TARGET_GOAL_REACHED",
+                "data": {
+                    "equity": round(equity, 2),
+                    "equity_vnd": round(current_equity_vnd),
+                    "target_goal": config.TARGET_PROFIT_GOAL,
+                    "custom_lot": config.CUSTOM_LOT_SIZE,
+                    "initial_capital": config.INITIAL_CAPITAL,
+                    "message": f"🎯 CẦU DAO CHỐT LỜI TỔNG KÍCH HOẠT: Tài sản đạt ${equity:,.2f} USD (Mục tiêu: ${config.TARGET_PROFIT_GOAL:,.2f} USD). Đã tự động đóng sạch các vị thế và dừng Bot!",
+                },
+            })
 
         # 2. Phân tích Price Action 6 Kịch bản thị trường (Chương 1)
         pa_result: MarketAnalysisResult = self.pa_analyzer.analyze_market(
@@ -491,20 +592,29 @@ class AITradingEngine:
         # 5. Đánh giá Cầu dao và Điều kiện An toàn
         is_safe_trade, safe_reason = self.risk_manager.is_safe_to_trade()
         locked_24h, lock_reason = self.risk_manager.is_locked_24h()
-        circuit_status = f"LOCKED_24H ({lock_reason})" if locked_24h else "NORMAL"
+        if not bot_running:
+            if self.target_reached_triggered:
+                circuit_status = f"TARGET_REACHED (${equity:,.2f} / ${config.TARGET_PROFIT_GOAL:,.2f} USD)"
+            else:
+                circuit_status = "STOPPED"
+        elif locked_24h:
+            circuit_status = f"LOCKED_24H ({lock_reason})"
+        else:
+            circuit_status = "NORMAL"
 
         # 6. Tính toán Monte Carlo VaR (Chương 2.8)
         var_metrics = self.risk_manager.evaluate_portfolio_var(list(recent_returns), equity)
 
         # 7. Quyết định VÀO LỆNH (EXECUTION)
-        # Bắt buộc thỏa mãn TOÀN BỘ 5 LỚP BẢO VỆ:
-        # - Lớp 1: Không bị khóa Cầu dao (Circuit Breaker Safe)
+        # Bắt buộc thỏa mãn TOÀN BỘ 5 LỚP BẢO VỆ + BOT_RUNNING == True:
+        # - Lớp 1: Không bị khóa Cầu dao (Circuit Breaker Safe) & Bot đang chạy
         # - Lớp 2: Không rơi vào Case F (Rollover/News) và Case C (Broadening Chaos)
         # - Lớp 3: HMM không ở trạng thái High Volatility Chaos
         # - Lớp 4: OOD Anomaly không bị cảnh báo dữ liệu lạ
         # - Lớp 5: Confidence Score >= 0.75 (75%)
         can_execute = (
-            is_safe_trade
+            bot_running
+            and is_safe_trade
             and pa_result.is_tradable
             and pa_result.recommended_action in (TradeAction.BUY, TradeAction.SELL)
             and hmm_is_safe
@@ -544,7 +654,12 @@ class AITradingEngine:
             }
 
         self.latest_state = {
-            "status": "RUNNING",
+            "status": "RUNNING" if bot_running else "STOPPED",
+            "bot_running": bot_running,
+            "initial_capital": config.INITIAL_CAPITAL,
+            "custom_lot": config.CUSTOM_LOT_SIZE,
+            "target_goal": config.TARGET_PROFIT_GOAL,
+            "equity_vnd": round(current_equity_vnd),
             "symbol": self.symbol,
             "last_price": round(current_price, 5),
             "bid": round(float(tick.bid), 5),
@@ -586,11 +701,56 @@ class AITradingEngine:
             await asyncio.sleep(self.loop_interval_sec)
 
     def start(self):
+        config.BOT_RUNNING = True
+        config_module.BOT_RUNNING = True
         if self._task is None or self._task.done():
-            self._task = asyncio.create_task(self._run_loop())
+            try:
+                loop = asyncio.get_running_loop()
+                self._task = loop.create_task(self._run_loop())
+            except RuntimeError:
+                pass
 
     def stop(self):
-        self.is_running = False
-        if self._task and not self._task.done():
-            self._task.cancel()
-        logging.info("Đã dừng AI Trading Engine.")
+        config.BOT_RUNNING = False
+        config_module.BOT_RUNNING = False
+        logging.info("Đã dừng phát lệnh AI Trading Engine.")
+
+
+def start_trading_loop():
+    """
+    Vòng lặp kiểm soát cầu dao chốt lời tổng và phát lệnh giao dịch (Chương 3.3 - v2).
+    Hỗ trợ gọi trực tiếp từ luồng background thread hoặc đồng bộ với AITradingEngine.
+    """
+    print("🤖 Bot AI bắt đầu chu kỳ quét tự động...")
+    logging.info("🤖 Bot AI bắt đầu chu kỳ quét tự động (Custom Lot: %s, Target Goal: $%s USD)...", config.CUSTOM_LOT_SIZE, f"{config.TARGET_PROFIT_GOAL:,.2f}")
+    risk_mgr = RiskManager()
+    engine = AITradingEngine()
+
+    # Nếu vòng lặp bất đồng bộ của Engine đang chạy trong FastAPI, chỉ cần bật cờ BOT_RUNNING
+    if engine.is_running and engine._task is not None and not engine._task.done():
+        config.BOT_RUNNING = True
+        config_module.BOT_RUNNING = True
+        return
+
+    while getattr(config, "BOT_RUNNING", False):
+        account_info = get_account_balance()
+        current_equity = account_info["equity"]  # Lấy Equity thực tế gồm cả lệnh đang chạy (VNĐ)
+
+        # 1. KIỂM TRA CẦU DAO CHỐT LỜI TỔNG (TARGET CIRCUIT BREAKER)
+        if risk_mgr.is_target_goal_reached(current_equity):
+            print("⚡ Tiến hành đóng toàn bộ vị thế đang mở để chốt bằng đúng số tiền mục tiêu...")
+            logging.info("⚡ Tiến hành đóng toàn bộ vị thế đang mở để chốt bằng đúng số tiền mục tiêu...")
+            close_all_positions()
+            config.BOT_RUNNING = False
+            config_module.BOT_RUNNING = False
+            print("🛑 BOT ĐÃ TỰ ĐỘNG DỪNG HOÀN TOÀN TẠI MỨC MỤC TIÊU!")
+            logging.info("🛑 BOT ĐÃ TỰ ĐỘNG DỪNG HOÀN TOÀN TẠI MỨC MỤC TIÊU!")
+            break  # Thoát hẳn vòng lặp giao dịch
+
+        # 2. Phát lệnh giao dịch với CUSTOM_LOT_SIZE nếu chưa đạt mục tiêu
+        _lot = risk_mgr.get_execution_lot()
+        try:
+            asyncio.run(engine.run_cycle())
+        except Exception as e:
+            logging.error(f"Lỗi trong start_trading_loop: {e}")
+        time.sleep(10)

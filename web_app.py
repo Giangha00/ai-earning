@@ -13,11 +13,14 @@ from pydantic import BaseModel
 import pandas as pd
 import numpy as np
 
+import threading
+import config as config_module
 from config import BASE_DIR, config
-from db import get_connection, init_database
+from db import get_connection, init_database, set_setting
 from mt5_connector import mt5, MT5Connector, IS_SIMULATION
-from ai_trading_engine import AITradingEngine
+from ai_trading_engine import AITradingEngine, start_trading_loop
 from ai_price_action import MarketCase
+from executor import close_all_positions
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - [%(levelname)s] - %(message)s")
 
@@ -89,9 +92,11 @@ async def startup_event():
     fetch_live_usd_vnd_rate()
     init_database()
     MT5Connector.connect()
-    # Khởi động AI Trading Engine chạy ngầm thời gian thực
+    # Khởi động luồng quét dữ liệu & biểu đồ thời gian thực (chờ lệnh kích hoạt Auto-Trade từ Web UI)
     engine = AITradingEngine()
-    engine.start()
+    if engine._task is None or engine._task.done():
+        import asyncio
+        engine._task = asyncio.create_task(engine._run_loop())
     logging.info("Hệ thống Web App và AI Trading Engine Realtime đã sẵn sàng.")
 
 
@@ -158,8 +163,15 @@ def get_account_info():
         floating_profit = cursor.fetchone()[0] or 0.0
 
     win_rate = (win_trades / closed_trades * 100) if closed_trades and closed_trades > 0 else 0.0
-    balance_usd = getattr(account_info, "balance", 10000.0)
+    balance_usd = float(getattr(account_info, "balance", config.MT5_BALANCE))
     equity_usd = balance_usd + floating_profit
+
+    # Tự động đồng bộ vốn trong ví Exness sang INITIAL_CAPITAL
+    config.INITIAL_CAPITAL = round(balance_usd, 2)
+    config_module.INITIAL_CAPITAL = config.INITIAL_CAPITAL
+    if getattr(config, "TARGET_PROFIT_GOAL", 0) <= 0:
+        config.TARGET_PROFIT_GOAL = round(balance_usd + 500.0, 2)
+        config_module.TARGET_PROFIT_GOAL = config.TARGET_PROFIT_GOAL
 
     # Tính toán VNĐ theo tỷ giá thực tế
     balance_vnd = balance_usd * rate
@@ -196,7 +208,116 @@ def get_account_info():
         "regime": engine.latest_state.get("regime", "BULLISH"),
         "circuit_breaker": engine.latest_state.get("circuit_breaker", "NORMAL"),
         "var_95": engine.latest_state.get("var_95", 0.0),
+        # Dynamic Bot Configuration (v2)
+        "initial_capital": config.INITIAL_CAPITAL,
+        "custom_lot": config.CUSTOM_LOT_SIZE,
+        "target_goal": config.TARGET_PROFIT_GOAL,
+        "bot_running": config.BOT_RUNNING,
     }
+
+
+class StartBotRequest(BaseModel):
+    initial_capital: Optional[float] = None
+    custom_lot: float = 0.01
+    target_goal: float = 100500.0
+
+
+@app.post("/api/start_bot")
+def start_bot_api(req: StartBotRequest):
+    """
+    API Tiếp Nhận Tham Số từ Web UI (Chương 2 & 3.1 - v2 - Đơn vị chuẩn USD):
+    - Vốn đánh (initial_capital) tự động đồng bộ trực tiếp từ số dư thực tế trong ví Exness MT5.
+    - Số Lot vào lệnh cố định - custom_lot
+    - Mức tiền mục tiêu muốn đạt để dừng (USD) - target_goal
+    """
+    if req.custom_lot <= 0:
+        raise HTTPException(status_code=400, detail="Số Lot cố định phải lớn hơn 0")
+    if req.target_goal <= 0:
+        raise HTTPException(status_code=400, detail="Mức lợi nhuận mục tiêu (USD) phải lớn hơn 0")
+
+    # Tự động lấy số dư thực tế từ ví Exness MT5 mà không cần người dùng nhập tay
+    account_info = mt5.account_info() if mt5 else None
+    wallet_balance_usd = round(float(getattr(account_info, "balance", config.MT5_BALANCE)), 2)
+
+    config.INITIAL_CAPITAL = wallet_balance_usd
+    config.CUSTOM_LOT_SIZE = round(float(req.custom_lot), 2)
+    config.TARGET_PROFIT_GOAL = round(float(req.target_goal), 2)
+    config.BOT_RUNNING = True
+
+    config_module.INITIAL_CAPITAL = config.INITIAL_CAPITAL
+    config_module.CUSTOM_LOT_SIZE = config.CUSTOM_LOT_SIZE
+    config_module.TARGET_PROFIT_GOAL = config.TARGET_PROFIT_GOAL
+    config_module.BOT_RUNNING = True
+
+    rate = USD_VND_RATE or 25870.0
+    set_setting("initial_capital_usd", str(config.INITIAL_CAPITAL))
+    set_setting("custom_lot_size", str(config.CUSTOM_LOT_SIZE))
+    set_setting("target_profit_goal_usd", str(config.TARGET_PROFIT_GOAL))
+
+    engine = AITradingEngine()
+    engine.target_reached_triggered = False
+    engine.risk_manager.circuit_breaker_locked_until = None
+    engine.risk_manager.lock_reason = ""
+    engine.risk_manager.consecutive_losses = 0
+    engine.risk_manager.reset_daily_state(wallet_balance_usd)
+    engine.latest_state["balance"] = wallet_balance_usd
+    engine.latest_state["equity_vnd"] = round(wallet_balance_usd * rate)
+    engine.latest_state["initial_capital"] = config.INITIAL_CAPITAL
+    engine.latest_state["custom_lot"] = config.CUSTOM_LOT_SIZE
+    engine.latest_state["target_goal"] = config.TARGET_PROFIT_GOAL
+    engine.latest_state["bot_running"] = True
+    engine.latest_state["status"] = "RUNNING"
+    engine.latest_state["circuit_breaker"] = "NORMAL"
+
+    # Ghi nhật ký hệ thống vào trading.log và SQLite bot_logs
+    log_msg = (
+        f"🚀 Khởi chạy AI Auto-Trade (v2) | Vốn ví Exness (Tự động đồng bộ): ${config.INITIAL_CAPITAL:,.2f} USD | "
+        f"Lot cố định: {config.CUSTOM_LOT_SIZE} | Mục tiêu chốt lời tổng: ${config.TARGET_PROFIT_GOAL:,.2f} USD"
+    )
+    logging.info(log_msg)
+    with get_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "INSERT INTO bot_logs (log_level, module, message) VALUES ('INFO', 'start_bot', ?);",
+            (log_msg,),
+        )
+        conn.commit()
+
+    # Phát luồng chạy ngầm theo hướng dẫn Chương 3.1
+    threading.Thread(target=start_trading_loop, daemon=True).start()
+    engine.start()
+
+    return {
+        "status": "success",
+        "message": f"Đã khởi chạy Bot với Lot: {config.CUSTOM_LOT_SIZE}",
+        "initial_capital": config.INITIAL_CAPITAL,
+        "custom_lot": config.CUSTOM_LOT_SIZE,
+        "target_goal": config.TARGET_PROFIT_GOAL,
+        "balance_usd": wallet_balance_usd,
+        "bot_running": True,
+    }
+
+
+@app.post("/api/stop_bot")
+def stop_bot_api():
+    """Tạm dừng Bot AI & đóng toàn bộ vị thế đang mở theo yêu cầu người dùng."""
+    closed_cnt = close_all_positions()
+    config.BOT_RUNNING = False
+    config_module.BOT_RUNNING = False
+    engine = AITradingEngine()
+    engine.stop()
+    engine.latest_state["bot_running"] = False
+    engine.latest_state["status"] = "STOPPED"
+    engine.latest_state["circuit_breaker"] = "STOPPED"
+
+    msg = f"🛑 Đã dừng Bot AI và đóng {closed_cnt} vị thế mở."
+    logging.info(msg)
+    with get_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("INSERT INTO bot_logs (log_level, module, message) VALUES ('WARNING', 'stop_bot', ?);", (msg,))
+        conn.commit()
+
+    return {"status": "success", "message": msg, "bot_running": False, "closed_positions": closed_cnt}
 
 
 class BalanceUpdateRequest(BaseModel):
@@ -219,8 +340,13 @@ def update_account_balance(req: BalanceUpdateRequest):
     if hasattr(mt5, "set_balance"):
         mt5.set_balance(req.balance)
 
-    # Đồng bộ vào Engine
+    # Đồng bộ vào Engine & Reset mốc số dư đầu ngày trong RiskManager
     engine = AITradingEngine()
+    engine.target_reached_triggered = False
+    engine.risk_manager.circuit_breaker_locked_until = None
+    engine.risk_manager.lock_reason = ""
+    engine.risk_manager.consecutive_losses = 0
+    engine.risk_manager.reset_daily_state(req.balance)
     engine.latest_state["balance"] = req.balance
     engine.latest_state["equity"] = req.balance
 
@@ -542,6 +668,15 @@ def close_order(ticket_id: int):
         """, (f"Đã đóng lệnh #{ticket_id} {symbol} tại {close_price}, lợi nhuận: +${profit:.2f} ({profit * USD_VND_RATE:,.0f} đ)",))
 
         conn.commit()
+
+    # Cộng lợi nhuận thực tế vào số dư tài khoản
+    acc = mt5.account_info() if mt5 else None
+    if acc is not None:
+        new_bal = round(float(acc.balance) + profit, 2)
+        config.MT5_BALANCE = new_bal
+        set_setting("account_balance", str(new_bal))
+        if hasattr(mt5, "set_balance"):
+            mt5.set_balance(new_bal)
 
     return {"success": True, "ticket_id": ticket_id, "profit": profit}
 

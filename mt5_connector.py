@@ -24,8 +24,7 @@ except (ImportError, ModuleNotFoundError):
             if balance is not None:
                 self.balance = float(balance)
             else:
-                saved = get_setting("account_balance")
-                self.balance = float(saved) if saved else getattr(config, "MT5_BALANCE", 10000.0)
+                self.balance = float(getattr(config, "MT5_BALANCE", 10000.0))
             self.equity = self.balance
             self.currency = "USD"
             self.leverage = 100
@@ -360,6 +359,12 @@ class MT5Connector:
         logging.info(f"Số dư (Balance): {account_info.balance} {account_info.currency}")
         logging.info(f"Tài sản ròng (Equity): {account_info.equity} {account_info.currency}")
         logging.info(f"Đòn bẩy (Leverage): 1:{account_info.leverage}")
+
+        # Tự động đồng bộ vốn ví Exness thực tế vào cấu hình Bot
+        config.MT5_BALANCE = float(account_info.balance)
+        config.INITIAL_CAPITAL = float(account_info.balance)
+        if getattr(config, "TARGET_PROFIT_GOAL", 0) <= config.INITIAL_CAPITAL:
+            config.TARGET_PROFIT_GOAL = round(config.INITIAL_CAPITAL + 500.0, 2)
         return True
 
     @staticmethod

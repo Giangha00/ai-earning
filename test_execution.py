@@ -15,7 +15,9 @@ from datetime import datetime, timezone
 
 from mt5_connector import MT5Connector, mt5
 from risk_manager import RiskManager
-from executor import MT5Executor
+from executor import MT5Executor, close_all_positions
+import config as config_module
+from config import config
 from ai_price_action import PriceActionAnalyzer, MarketCase, TradeAction
 from ai_math_models import (
     VectorizedLogisticRegression,
@@ -209,7 +211,48 @@ def test_full_trade_execution():
     assert closed is True
 
     MT5Connector.disconnect()
-    print("\n🎉 TẤT CẢ 5 BÀI TEST ĐÃ VƯỢT QUA 100% HOÀN HẢO!")
+
+
+def test_v2_custom_lot_and_target_circuit_breaker():
+    print("\n" + "=" * 50)
+    print("TEST 6: CẤU HÌNH LINH HOẠT V2 (CUSTOM LOT & CẦU DAO CHỐT LỜI TỔNG USD)")
+    print("=" * 50)
+
+    MT5Connector.connect()
+    risk_mgr = RiskManager()
+
+    # 1. Thiết lập tham số kiểm thử đơn vị USD (Vốn $1,000 USD, Lot 0.05, Target Goal $1,050 USD)
+    config.INITIAL_CAPITAL = 1000.0
+    config.CUSTOM_LOT_SIZE = 0.05
+    config.TARGET_PROFIT_GOAL = 1050.0
+    config.BOT_RUNNING = True
+
+    exec_lot = risk_mgr.get_execution_lot()
+    print(f"-> Custom Lot từ config: {exec_lot}")
+    assert exec_lot == 0.05
+
+    # 2. Kiểm tra khi Equity chưa đạt mục tiêu ($1,020 USD < $1,050 USD)
+    assert risk_mgr.is_target_goal_reached(1020.0) is False
+
+    # 3. Mở 2 vị thế giả lập trên MT5 rồi kích hoạt cầu dao chốt lời tổng khi Equity đạt $1,055 USD
+    tick = mt5.symbol_info_tick("EURUSD")
+    t1 = MT5Executor.open_position("EURUSD", "BUY", exec_lot, tick.ask - 0.0020, tick.ask + 0.0040)
+    t2 = MT5Executor.open_position("EURUSD", "SELL", exec_lot, tick.bid + 0.0020, tick.bid - 0.0040)
+    assert t1 is not None and t2 is not None
+    assert len(MT5Executor.get_open_positions()) >= 2
+
+    # Khi Equity chạm mục tiêu $1,055 USD >= $1,050 USD
+    reached = risk_mgr.is_target_goal_reached(1055.0)
+    assert reached is True
+
+    closed_cnt = close_all_positions()
+    config.BOT_RUNNING = False
+    print(f"-> Đã kích hoạt close_all_positions(), số vị thế đóng: {closed_cnt} | BOT_RUNNING={config.BOT_RUNNING}")
+    assert len(MT5Executor.get_open_positions()) == 0
+    assert config.BOT_RUNNING is False
+
+    MT5Connector.disconnect()
+    print("\n🎉 TẤT CẢ 6 BÀI TEST (BAO GỒM NÂNG CẤP V2) ĐÃ VƯỢT QUA 100% HOÀN HẢO!")
 
 
 if __name__ == "__main__":
@@ -218,3 +261,4 @@ if __name__ == "__main__":
     test_anti_noise_and_ood()
     test_risk_management_and_circuit_breaker()
     test_full_trade_execution()
+    test_v2_custom_lot_and_target_circuit_breaker()

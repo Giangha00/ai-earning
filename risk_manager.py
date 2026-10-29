@@ -18,8 +18,17 @@ except (ImportError, ModuleNotFoundError):
     from mt5_connector import mt5
 
 from ai_math_models import MonteCarloRiskEstimator
+import config as config_module
+from config import config, BASE_DIR
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s - [%(levelname)s] - %(message)s")
+# Cấu hình ghi log ra cả console và tệp trading.log (Chương 4.3)
+_log_formatter = logging.Formatter("%(asctime)s - [%(levelname)s] - %(message)s")
+_root_logger = logging.getLogger()
+_root_logger.setLevel(logging.INFO)
+if not any(isinstance(h, logging.FileHandler) and getattr(h, "baseFilename", "").endswith("trading.log") for h in _root_logger.handlers):
+    _file_handler = logging.FileHandler(BASE_DIR / "trading.log", encoding="utf-8")
+    _file_handler.setFormatter(_log_formatter)
+    _root_logger.addHandler(_file_handler)
 
 
 class RiskManager:
@@ -52,6 +61,28 @@ class RiskManager:
         self.consecutive_losses: int = 0
         self.circuit_breaker_locked_until: Optional[datetime] = None
         self.lock_reason: str = ""
+
+    def get_execution_lot(self) -> float:
+        """
+        Ưu tiên sử dụng Số Lot cố định do người dùng chỉ định (Custom Lot Size) từ Web UI (v2).
+        """
+        custom_lot = getattr(config, "CUSTOM_LOT_SIZE", 0) or getattr(config_module, "CUSTOM_LOT_SIZE", 0)
+        if custom_lot and float(custom_lot) > 0:
+            return round(float(custom_lot), 2)
+        return 0.01  # Mặc định an toàn
+
+    def is_target_goal_reached(self, current_equity: float) -> bool:
+        """
+        Cầu dao chốt lời tổng (Target Profit Circuit Breaker - v2):
+        Kiểm tra tổng tài sản thực tế (Equity USD) đã đạt mốc mục tiêu TARGET_PROFIT_GOAL (USD) chưa.
+        """
+        target = getattr(config, "TARGET_PROFIT_GOAL", 0) or getattr(config_module, "TARGET_PROFIT_GOAL", 0)
+        if target and float(target) > 0 and current_equity >= float(target):
+            msg = f"🎯 [TARGET REACHED] Equity ${current_equity:,.2f} USD >= Mục tiêu ${float(target):,.2f} USD"
+            print(msg)
+            logging.info(msg)
+            return True
+        return False
 
     def update_daily_balance(self, current_balance: float) -> None:
         """Cập nhật số dư đầu ngày."""

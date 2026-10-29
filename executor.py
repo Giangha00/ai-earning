@@ -161,3 +161,90 @@ class MT5Executor:
         if magic_number is not None:
             return [p for p in positions if p.magic == magic_number]
         return list(positions)
+
+    @classmethod
+    def close_all_positions(cls) -> int:
+        """Quét và đóng sạch toàn bộ các vị thế đang mở trên sàn MT5/Exness."""
+        return close_all_positions()
+
+
+def close_all_positions() -> int:
+    """
+    Hàm đóng toàn bộ vị thế đang mở trên MT5 (Chương 3.2 - Cầu dao chốt lời tổng v2).
+    Sử dụng deviation = 20 để đảm bảo khớp đóng tức thì ngay cả khi thị trường biến động.
+    """
+    closed_count = 0
+    positions = mt5.positions_get()
+    if positions:
+        for pos in positions:
+            tick = mt5.symbol_info_tick(pos.symbol)
+            if tick is None:
+                continue
+            type_dict = {0: mt5.ORDER_TYPE_SELL, 1: mt5.ORDER_TYPE_BUY}
+            price_dict = {0: tick.bid, 1: tick.ask}
+            req = {
+                "action": mt5.TRADE_ACTION_DEAL,
+                "position": pos.ticket,
+                "symbol": pos.symbol,
+                "volume": pos.volume,
+                "type": type_dict.get(pos.type, mt5.ORDER_TYPE_SELL),
+                "price": price_dict.get(pos.type, tick.bid),
+                "deviation": 20,
+                "magic": 100001,
+                "comment": "Close All on Target Goal",
+            }
+            res = mt5.order_send(req)
+            if res is not None:
+                closed_count += 1
+                logging.info(f"Đã đóng vị thế MT5 #{pos.ticket} ({pos.symbol}, {pos.volume} lot) do chạm mục tiêu chốt lời tổng.")
+
+    # Đồng bộ đóng toàn bộ các lệnh đang OPEN trong SQLite Database để UI và số dư đồng nhất
+    try:
+        from datetime import datetime
+        from db import get_connection, set_setting
+        from config import config
+
+        close_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        with get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT ticket_id, symbol, order_type, lot_size, open_price FROM orders WHERE status = 'OPEN';"
+            )
+            open_orders = cursor.fetchall()
+            realized_delta = 0.0
+            for ticket_id, sym, o_type, lot, o_price in open_orders:
+                tick = mt5.symbol_info_tick(sym)
+                close_price = float(tick.bid if o_type == "BUY" else tick.ask) if tick else float(o_price)
+                mult = 100.0 if "XAU" in sym or "GOLD" in sym else 100000.0
+                profit = (close_price - o_price) * mult * lot if o_type == "BUY" else (o_price - close_price) * mult * lot
+                realized_delta += profit
+
+                cursor.execute(
+                    """
+                    UPDATE orders
+                    SET close_time = ?, close_price = ?, profit = ?, close_reason = 'TARGET_GOAL_REACHED', status = 'CLOSED'
+                    WHERE ticket_id = ?;
+                    """,
+                    (close_time, close_price, profit, ticket_id),
+                )
+                closed_count += 1
+
+            if open_orders:
+                cursor.execute(
+                    "INSERT INTO bot_logs (log_level, module, message) VALUES ('INFO', 'target_breaker', ?);",
+                    (f"Cầu dao chốt lời tổng: Đã tự động đóng sạch {len(open_orders)} vị thế đang mở để bảo toàn mục tiêu lợi nhuận.",),
+                )
+            conn.commit()
+
+            if realized_delta != 0.0:
+                acc = mt5.account_info()
+                if acc is not None:
+                    new_bal = round(float(acc.balance) + realized_delta, 2)
+                    config.MT5_BALANCE = new_bal
+                    set_setting("account_balance", str(new_bal))
+                    if hasattr(mt5, "set_balance"):
+                        mt5.set_balance(new_bal)
+    except Exception as e:
+        logging.error(f"Lỗi khi đồng bộ đóng vị thế trong DB: {e}")
+
+    return closed_count

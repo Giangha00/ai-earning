@@ -20,6 +20,7 @@ let liveSocket = null;
 document.addEventListener("DOMContentLoaded", () => {
   initCharts();
   initOrderForm();
+  initBotConfigForm();
   initTabs();
   initControls();
   initMarketsModal();
@@ -61,6 +62,11 @@ function initWebSocket() {
           showToast(`⚡ AI Bot khớp lệnh: ${msg.data.order_type} ${msg.data.lot_size} lot ${msg.data.symbol} (R:R 1:${msg.data.rr_ratio})`);
           loadOrdersSidebar();
           loadSignals();
+          loadAccountData();
+        } else if (msg.type === "TARGET_GOAL_REACHED") {
+          showToast(msg.data.message || "🎯 CẦU DAO CHỐT LỜI TỔNG KÍCH HOẠT: Đã đóng hết lệnh & dừng Bot!");
+          loadOrdersSidebar();
+          loadLogs();
           loadAccountData();
         }
       } catch (err) {
@@ -211,13 +217,21 @@ function handleRealtimeTick(data) {
     hudOodScore.innerText = `Anomaly Score: ${(data.anomaly_score || 0).toFixed(3)} (Ngưỡng OOD: 0.05)`;
   }
 
-  // 6. Cập nhật Cầu dao 24H (Chương 4.4)
+  // 6. Cập nhật Cầu dao 24H & Cầu dao chốt lời tổng (v2)
   const hudCircuit = document.getElementById("hud-circuit-breaker");
   if (hudCircuit && data.circuit_breaker) {
     const isLocked = data.circuit_breaker.includes("LOCKED");
-    hudCircuit.innerHTML = isLocked
-      ? `<span class="text-red" style="font-weight: 800;">🚨 ${data.circuit_breaker}</span>`
-      : `<span class="text-green" style="font-weight: 700;">HOẠT ĐỘNG (${data.consecutive_losses || 0}/2 Lỗ)</span>`;
+    const isTarget = data.circuit_breaker.includes("TARGET_REACHED");
+    const isStopped = data.circuit_breaker === "STOPPED";
+    if (isTarget) {
+      hudCircuit.innerHTML = `<span class="text-gold" style="font-weight: 800;">🎯 ${data.circuit_breaker}</span>`;
+    } else if (isLocked) {
+      hudCircuit.innerHTML = `<span class="text-red" style="font-weight: 800;">🚨 ${data.circuit_breaker}</span>`;
+    } else if (isStopped) {
+      hudCircuit.innerHTML = `<span class="text-amber" style="font-weight: 700;">⏸️ BOT ĐANG TẠM DỪNG</span>`;
+    } else {
+      hudCircuit.innerHTML = `<span class="text-green" style="font-weight: 700;">HOẠT ĐỘNG (${data.consecutive_losses || 0}/2 Lỗ)</span>`;
+    }
   }
 
   // 7. Độ tin cậy & Monte Carlo VaR (Chương 2.8)
@@ -228,12 +242,13 @@ function handleRealtimeTick(data) {
   const hudTime = document.getElementById("hud-last-update");
   if (hudTime) hudTime.innerText = `Cập nhật: ${data.updated_at || '--'}`;
 
-  // 8. Cập nhật số dư & PnL USD realtime (Chuẩn Exness MT5)
+  // 8. Cập nhật số dư & PnL USD realtime + Trạng thái Cầu Dao Chốt Lời Tổng (v2)
   if (data.equity !== undefined) {
     const balUsd = Number(data.balance || data.equity || 10000);
     const eqUsd = Number(data.equity || balUsd);
     const flUsd = Number(data.floating_pnl || 0);
     const balVnd = Math.round(balUsd * usdToVndRate);
+    const eqVnd = Number(data.equity_vnd || Math.round(eqUsd * usdToVndRate));
 
     const wBalUsd = document.getElementById("wallet-balance-usd");
     if (wBalUsd) wBalUsd.innerText = `$${balUsd.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
@@ -249,6 +264,18 @@ function handleRealtimeTick(data) {
 
     const wBalVnd = document.getElementById("wallet-balance-vnd");
     if (wBalVnd) wBalVnd.innerText = `~${balVnd.toLocaleString("vi-VN")} ₫`;
+
+    // Tự động đồng bộ số dư ví Exness trực tiếp vào ô Vốn (#initial_capital) mà không cần nhập
+    const initCapInput = document.getElementById("initial_capital");
+    if (initCapInput) {
+      initCapInput.value = balUsd.toFixed(2);
+    }
+    const subVndEl = document.getElementById("sub-initial-capital-vnd");
+    if (subVndEl) {
+      subVndEl.innerText = `~${balVnd.toLocaleString("vi-VN")} ₫`;
+    }
+
+    updateBotTargetStatusUI(eqUsd, data.target_goal, data.bot_running, data.custom_lot);
   }
 }
 
@@ -484,6 +511,33 @@ async function loadAccountData() {
       realizedEl.innerText = `${realizedUsd >= 0 ? "+" : ""}$${realizedUsd.toFixed(2)}`;
       realizedEl.style.color = realizedUsd >= 0 ? "var(--color-gold)" : "var(--color-red)";
     }
+
+    // Tự động đồng bộ số dư ví Exness vào ô Vốn (#initial_capital) & cấu hình Bot v2
+    const initCapInput = document.getElementById("initial_capital");
+    const customLotInput = document.getElementById("custom_lot");
+    const targetGoalInput = document.getElementById("target_goal");
+    if (initCapInput) {
+      initCapInput.value = balUsd.toFixed(2);
+      const subVndEl = document.getElementById("sub-initial-capital-vnd");
+      if (subVndEl) {
+        subVndEl.innerText = `~${Math.round(balUsd * usdToVndRate).toLocaleString("vi-VN")} ₫`;
+      }
+    }
+    if (customLotInput && !customLotInput.dataset.modified && data.custom_lot) {
+      customLotInput.value = Number(data.custom_lot).toFixed(2);
+    }
+    if (targetGoalInput && !targetGoalInput.dataset.modified) {
+      const defaultTarget = (data.target_goal && Number(data.target_goal) > balUsd)
+        ? Number(data.target_goal)
+        : Math.round(balUsd + 500);
+      targetGoalInput.value = defaultTarget;
+    }
+    updateBotTargetStatusUI(
+      eqUsd,
+      data.target_goal,
+      data.bot_running,
+      data.custom_lot
+    );
 
   } catch (err) {
     console.error("Lỗi tải thông tin tài khoản:", err);
@@ -1337,3 +1391,125 @@ function initBalanceSync() {
     });
   }
 }
+
+// ==========================================================================
+// 3. CẤU HÌNH LINH HOẠT BOT AI AUTO-TRADE & CẦU DAO CHỐT LỜI TỔNG (v2 - USD)
+// ==========================================================================
+function initBotConfigForm() {
+  const initCapInput = document.getElementById("initial_capital");
+  const customLotInput = document.getElementById("custom_lot");
+  const targetGoalInput = document.getElementById("target_goal");
+  const subVndEl = document.getElementById("sub-initial-capital-vnd");
+
+  function refreshVndPreview() {
+    if (!initCapInput || !subVndEl) return;
+    const capUsd = parseFloat(initCapInput.value) || 0;
+    const capVnd = Math.round(capUsd * (usdToVndRate || 25870));
+    subVndEl.innerText = `~${capVnd.toLocaleString("vi-VN")} ₫`;
+  }
+
+  if (initCapInput) {
+    initCapInput.addEventListener("input", () => {
+      initCapInput.dataset.modified = "true";
+      refreshVndPreview();
+    });
+  }
+  if (customLotInput) {
+    customLotInput.addEventListener("input", () => {
+      customLotInput.dataset.modified = "true";
+    });
+  }
+  if (targetGoalInput) {
+    targetGoalInput.addEventListener("input", () => {
+      targetGoalInput.dataset.modified = "true";
+    });
+  }
+  refreshVndPreview();
+}
+
+function updateBotTargetStatusUI(equityUsd, targetGoalUsd, botRunning, customLot) {
+  const badge = document.getElementById("bot-running-badge");
+  const progressText = document.getElementById("bot-target-progress-text");
+  const target = Number(targetGoalUsd || (document.getElementById("target_goal") && document.getElementById("target_goal").value) || 1500);
+  const eq = Number(equityUsd || 0);
+  const lot = Number(customLot || (document.getElementById("custom_lot") && document.getElementById("custom_lot").value) || 0.01);
+
+  if (badge) {
+    if (botRunning === false) {
+      if (target > 0 && eq >= target) {
+        badge.className = "badge badge-case-d";
+        badge.innerText = "🎯 ĐÃ CHỐT LỜI TỔNG & DỪNG BOT";
+      } else {
+        badge.className = "badge badge-hold";
+        badge.innerText = "🛑 BOT ĐÃ DỪNG";
+      }
+    } else {
+      badge.className = "badge badge-buy";
+      badge.innerText = `🟢 BOT ĐANG CHẠY (${lot.toFixed(2)} Lot)`;
+    }
+  }
+
+  if (progressText) {
+    const pct = target > 0 ? Math.min(100, Math.max(0, (eq / target) * 100)) : 0;
+    const eqFmt = eq.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+    const targetFmt = target.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+    progressText.innerText = `Equity thực tế: $${eqFmt} USD / Mục tiêu: $${targetFmt} USD (${pct.toFixed(1)}%)`;
+    progressText.style.color = eq >= target ? "var(--color-gold)" : "var(--color-cyan)";
+  }
+}
+
+async function startBot() {
+  const initCapEl = document.getElementById("initial_capital");
+  const customLotEl = document.getElementById("custom_lot");
+  const targetGoalEl = document.getElementById("target_goal");
+
+  const initial_capital = parseFloat(initCapEl ? initCapEl.value : 1000) || 1000;
+  const custom_lot = parseFloat(customLotEl ? customLotEl.value : 0.01) || 0.01;
+  const target_goal = parseFloat(targetGoalEl ? targetGoalEl.value : 1500) || 1500;
+
+  try {
+    const res = await fetch("/api/start_bot", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        initial_capital: initial_capital,
+        custom_lot: custom_lot,
+        target_goal: target_goal
+      })
+    });
+    const data = await res.json();
+    if (res.ok && data.status === "success") {
+      // Đồng bộ luôn ô Lot ở bảng đặt lệnh bên dưới
+      const orderLotInput = document.getElementById("input-lot-size");
+      if (orderLotInput) {
+        orderLotInput.value = custom_lot.toFixed(2);
+        recalcEstimatedProfit();
+      }
+      showToast(`🚀 ${data.message} | Vốn: $${initial_capital.toLocaleString("en-US", { minimumFractionDigits: 2 })} USD → Mục tiêu: $${target_goal.toLocaleString("en-US", { minimumFractionDigits: 2 })} USD`);
+      await loadAccountData();
+      await loadLogs();
+    } else {
+      showToast(`❌ ${data.detail || "Không thể khởi chạy Bot"}`);
+    }
+  } catch (err) {
+    showToast(`❌ Lỗi kết nối khi khởi chạy Bot: ${err.message}`);
+  }
+}
+
+async function stopBot() {
+  try {
+    const res = await fetch("/api/stop_bot", { method: "POST" });
+    const data = await res.json();
+    if (res.ok && data.status === "success") {
+      showToast(data.message || "🛑 Đã dừng Bot AI và đóng toàn bộ vị thế!");
+      await loadAccountData();
+      await loadOrdersSidebar();
+      await loadLogs();
+    }
+  } catch (err) {
+    showToast(`❌ Lỗi khi dừng Bot: ${err.message}`);
+  }
+}
+
+window.startBot = startBot;
+window.stopBot = stopBot;

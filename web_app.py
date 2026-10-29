@@ -166,13 +166,6 @@ def get_account_info():
     balance_usd = float(getattr(account_info, "balance", config.MT5_BALANCE))
     equity_usd = balance_usd + floating_profit
 
-    # Tự động đồng bộ vốn trong ví Exness sang INITIAL_CAPITAL
-    config.INITIAL_CAPITAL = round(balance_usd, 2)
-    config_module.INITIAL_CAPITAL = config.INITIAL_CAPITAL
-    if getattr(config, "TARGET_PROFIT_GOAL", 0) <= 0:
-        config.TARGET_PROFIT_GOAL = round(balance_usd + 500.0, 2)
-        config_module.TARGET_PROFIT_GOAL = config.TARGET_PROFIT_GOAL
-
     # Tính toán VNĐ theo tỷ giá thực tế
     balance_vnd = balance_usd * rate
     equity_vnd = equity_usd * rate
@@ -180,6 +173,9 @@ def get_account_info():
     total_profit_vnd = (total_profit or 0.0) * rate
 
     engine = AITradingEngine()
+    if engine.session_start_wallet_equity is None:
+        engine.session_start_wallet_equity = equity_usd
+    bot_equity_usd = round(float(config.INITIAL_CAPITAL) + (equity_usd - engine.session_start_wallet_equity), 2)
 
     return {
         "status": "connected",
@@ -189,7 +185,7 @@ def get_account_info():
         "server": getattr(account_info, "server", config.MT5_SERVER),
         "currency": getattr(account_info, "currency", "USD"),
         "usd_vnd_rate": round(rate),
-        # USD Metrics
+        # USD Metrics (Ví Exness tự động đồng bộ)
         "balance": balance_usd,
         "equity": equity_usd,
         "floating_pnl": floating_profit,
@@ -208,8 +204,9 @@ def get_account_info():
         "regime": engine.latest_state.get("regime", "BULLISH"),
         "circuit_breaker": engine.latest_state.get("circuit_breaker", "NORMAL"),
         "var_95": engine.latest_state.get("var_95", 0.0),
-        # Dynamic Bot Configuration (v2)
+        # Dynamic Bot Configuration (v2 - Vốn trích ra đánh do người dùng nhập)
         "initial_capital": config.INITIAL_CAPITAL,
+        "bot_equity": bot_equity_usd,
         "custom_lot": config.CUSTOM_LOT_SIZE,
         "target_goal": config.TARGET_PROFIT_GOAL,
         "bot_running": config.BOT_RUNNING,
@@ -217,29 +214,36 @@ def get_account_info():
 
 
 class StartBotRequest(BaseModel):
-    initial_capital: Optional[float] = None
+    initial_capital: float = 100.0
     custom_lot: float = 0.01
-    target_goal: float = 100500.0
+    target_goal: float = 200.0
 
 
 @app.post("/api/start_bot")
 def start_bot_api(req: StartBotRequest):
     """
     API Tiếp Nhận Tham Số từ Web UI (Chương 2 & 3.1 - v2 - Đơn vị chuẩn USD):
-    - Vốn đánh (initial_capital) tự động đồng bộ trực tiếp từ số dư thực tế trong ví Exness MT5.
-    - Số Lot vào lệnh cố định - custom_lot
-    - Mức tiền mục tiêu muốn đạt để dừng (USD) - target_goal
+    1. Số tiền vốn đánh (USD) trích từ ví Exness - initial_capital (do người dùng nhập)
+    2. Số Lot vào lệnh cố định - custom_lot
+    3. Mức tiền mục tiêu muốn đạt để dừng (USD) - target_goal
     """
+    if req.initial_capital is None or req.initial_capital <= 0:
+        raise HTTPException(status_code=400, detail="Số tiền vốn đánh (USD) phải lớn hơn 0")
     if req.custom_lot <= 0:
         raise HTTPException(status_code=400, detail="Số Lot cố định phải lớn hơn 0")
     if req.target_goal <= 0:
         raise HTTPException(status_code=400, detail="Mức lợi nhuận mục tiêu (USD) phải lớn hơn 0")
 
-    # Tự động lấy số dư thực tế từ ví Exness MT5 mà không cần người dùng nhập tay
     account_info = mt5.account_info() if mt5 else None
     wallet_balance_usd = round(float(getattr(account_info, "balance", config.MT5_BALANCE)), 2)
 
-    config.INITIAL_CAPITAL = wallet_balance_usd
+    if req.initial_capital > wallet_balance_usd:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Số tiền vốn đánh (${req.initial_capital:,.2f}) không được vượt quá số dư ví Exness hiện tại (${wallet_balance_usd:,.2f})",
+        )
+
+    config.INITIAL_CAPITAL = round(float(req.initial_capital), 2)
     config.CUSTOM_LOT_SIZE = round(float(req.custom_lot), 2)
     config.TARGET_PROFIT_GOAL = round(float(req.target_goal), 2)
     config.BOT_RUNNING = True
@@ -249,20 +253,25 @@ def start_bot_api(req: StartBotRequest):
     config_module.TARGET_PROFIT_GOAL = config.TARGET_PROFIT_GOAL
     config_module.BOT_RUNNING = True
 
-    rate = USD_VND_RATE or 25870.0
     set_setting("initial_capital_usd", str(config.INITIAL_CAPITAL))
     set_setting("custom_lot_size", str(config.CUSTOM_LOT_SIZE))
     set_setting("target_profit_goal_usd", str(config.TARGET_PROFIT_GOAL))
 
+    with get_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT SUM(profit) FROM orders WHERE status = 'OPEN';")
+        floating_profit = cursor.fetchone()[0] or 0.0
+    wallet_equity_usd = wallet_balance_usd + float(floating_profit)
+
     engine = AITradingEngine()
     engine.target_reached_triggered = False
+    engine.session_start_wallet_equity = wallet_equity_usd
     engine.risk_manager.circuit_breaker_locked_until = None
     engine.risk_manager.lock_reason = ""
     engine.risk_manager.consecutive_losses = 0
     engine.risk_manager.reset_daily_state(wallet_balance_usd)
-    engine.latest_state["balance"] = wallet_balance_usd
-    engine.latest_state["equity_vnd"] = round(wallet_balance_usd * rate)
     engine.latest_state["initial_capital"] = config.INITIAL_CAPITAL
+    engine.latest_state["bot_equity"] = config.INITIAL_CAPITAL
     engine.latest_state["custom_lot"] = config.CUSTOM_LOT_SIZE
     engine.latest_state["target_goal"] = config.TARGET_PROFIT_GOAL
     engine.latest_state["bot_running"] = True
@@ -271,7 +280,7 @@ def start_bot_api(req: StartBotRequest):
 
     # Ghi nhật ký hệ thống vào trading.log và SQLite bot_logs
     log_msg = (
-        f"🚀 Khởi chạy AI Auto-Trade (v2) | Vốn ví Exness (Tự động đồng bộ): ${config.INITIAL_CAPITAL:,.2f} USD | "
+        f"🚀 Khởi chạy AI Auto-Trade (v2) | Vốn trích đánh: ${config.INITIAL_CAPITAL:,.2f} USD (Ví Exness: ${wallet_balance_usd:,.2f} USD) | "
         f"Lot cố định: {config.CUSTOM_LOT_SIZE} | Mục tiêu chốt lời tổng: ${config.TARGET_PROFIT_GOAL:,.2f} USD"
     )
     logging.info(log_msg)
@@ -289,8 +298,9 @@ def start_bot_api(req: StartBotRequest):
 
     return {
         "status": "success",
-        "message": f"Đã khởi chạy Bot với Lot: {config.CUSTOM_LOT_SIZE}",
+        "message": f"Đã khởi chạy Bot với Vốn đánh ${config.INITIAL_CAPITAL:,.2f} USD & Lot: {config.CUSTOM_LOT_SIZE}",
         "initial_capital": config.INITIAL_CAPITAL,
+        "bot_equity": config.INITIAL_CAPITAL,
         "custom_lot": config.CUSTOM_LOT_SIZE,
         "target_goal": config.TARGET_PROFIT_GOAL,
         "balance_usd": wallet_balance_usd,

@@ -15,10 +15,10 @@ class Config:
     DB_PATH: Path = BASE_DIR / os.getenv("DB_NAME", "trading_bot.db")
     LOG_PATH: Path = BASE_DIR / "trading.log"
 
-    # Các biến cấu hình động điều khiển Bot AI (v2 - Tự động đồng bộ theo số dư ví Exness MT5)
-    INITIAL_CAPITAL: float = float(os.getenv("INITIAL_CAPITAL") or MT5_BALANCE)
+    # Các biến cấu hình động điều khiển Bot AI (v2 - Đơn vị chuẩn USD)
+    INITIAL_CAPITAL: float = float(os.getenv("INITIAL_CAPITAL") or 100.0)
     CUSTOM_LOT_SIZE: float = float(os.getenv("CUSTOM_LOT_SIZE") or 0.01)
-    TARGET_PROFIT_GOAL: float = float(os.getenv("TARGET_PROFIT_GOAL") or (INITIAL_CAPITAL + 500.0))
+    TARGET_PROFIT_GOAL: float = float(os.getenv("TARGET_PROFIT_GOAL") or 200.0)
     BOT_RUNNING: bool = os.getenv("BOT_RUNNING", "false").lower() in ("true", "1", "yes")
 
 

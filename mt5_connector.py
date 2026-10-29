@@ -360,11 +360,8 @@ class MT5Connector:
         logging.info(f"Tài sản ròng (Equity): {account_info.equity} {account_info.currency}")
         logging.info(f"Đòn bẩy (Leverage): 1:{account_info.leverage}")
 
-        # Tự động đồng bộ vốn ví Exness thực tế vào cấu hình Bot
+        # Tự động đồng bộ số dư ví Exness thực tế
         config.MT5_BALANCE = float(account_info.balance)
-        config.INITIAL_CAPITAL = float(account_info.balance)
-        if getattr(config, "TARGET_PROFIT_GOAL", 0) <= config.INITIAL_CAPITAL:
-            config.TARGET_PROFIT_GOAL = round(config.INITIAL_CAPITAL + 500.0, 2)
         return True
 
     @staticmethod

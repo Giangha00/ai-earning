@@ -214,11 +214,11 @@
           <div class="order-inputs-grid">
             <div class="form-group">
               <label for="initial_capital">
-                <span>Số dư vốn ví Exness (USD):</span>
-                <span class="text-cyan" style="font-weight: 700;">⚡ Tự động đồng bộ</span>
+                <span>Số tiền vốn đánh (USD):</span>
+                <span class="text-gold" style="font-weight: 700;">Initial Capital ($)</span>
               </label>
-              <input type="number" id="initial_capital" value="100000" step="any" class="form-control form-input" readonly style="opacity: 0.9; cursor: default; border-color: rgba(6, 182, 212, 0.35);">
-              <span class="text-muted" style="font-size: 11px;">Tự động lấy từ ví Exness • Quy đổi: <strong class="text-cyan" id="sub-initial-capital-vnd">~0 ₫</strong></span>
+              <input type="number" id="initial_capital" value="100" min="1" step="any" class="form-control form-input" placeholder="Nhập số vốn muốn trích từ ví..." required>
+              <span class="text-muted" style="font-size: 11px;">Trích từ ví Exness • Quy đổi: <strong class="text-cyan" id="sub-initial-capital-vnd">~2,587,000 ₫</strong></span>
             </div>
 
             <div class="form-group">
@@ -235,7 +235,7 @@
                 <span>Mức tiền mục tiêu muốn đạt để dừng (USD):</span>
                 <span class="text-green" style="font-weight: 700;">Target Profit Goal ($)</span>
               </label>
-              <input type="number" id="target_goal" value="1500" min="1" step="any" class="form-control form-input" required>
+              <input type="number" id="target_goal" value="200" min="1" step="any" class="form-control form-input" placeholder="Nhập mục tiêu USD muốn đạt..." required>
               <span class="text-muted" style="font-size: 11px;">Tự động gọi <code>close_all_positions()</code> &amp; dừng Bot khi chạm mốc USD</span>
             </div>
           </div>

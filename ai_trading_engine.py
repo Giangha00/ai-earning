@@ -63,12 +63,18 @@ def get_account_balance(usd_vnd_rate: float = DEFAULT_USD_VND_RATE) -> Dict[str,
         pass
 
     equity_usd = balance_usd + floating_pnl_usd
+    engine = AITradingEngine._instance
+    if engine and engine.session_start_wallet_equity is not None:
+        bot_equity_usd = round(float(config.INITIAL_CAPITAL) + (equity_usd - engine.session_start_wallet_equity), 2)
+    else:
+        bot_equity_usd = float(getattr(config, "INITIAL_CAPITAL", equity_usd))
 
     return {
         "balance": balance_usd,
-        "equity": equity_usd,
+        "equity": bot_equity_usd,
+        "wallet_equity_usd": equity_usd,
         "balance_usd": balance_usd,
-        "equity_usd": equity_usd,
+        "equity_usd": bot_equity_usd,
         "floating_pnl_usd": floating_pnl_usd,
         "floating_pnl_vnd": floating_pnl_usd * usd_vnd_rate,
     }
@@ -91,6 +97,7 @@ class AITradingEngine:
         self.timeframe_str: str = "M5"
         self.is_running: bool = False
         self.target_reached_triggered: bool = False
+        self.session_start_wallet_equity: Optional[float] = None
         self.loop_interval_sec: float = 1.5  # Chu kỳ quét nhịp realtime (1.5s)
 
         # 1. Quản lý Rủi ro (Chương 3.1, 4.4, 5)
@@ -499,15 +506,22 @@ class AITradingEngine:
         # Cập nhật floating PnL của các lệnh đang chạy
         floating_pnl = await self.update_open_positions_pnl(current_price)
 
-        # Thông tin tài khoản (USD)
+        # Thông tin tài khoản ví Exness thực tế (USD)
         acc = mt5.account_info()
         balance = float(getattr(acc, "balance", 10000.0))
         equity = balance + floating_pnl
         current_equity_vnd = equity * DEFAULT_USD_VND_RATE
 
+        if self.session_start_wallet_equity is None:
+            self.session_start_wallet_equity = equity
+
+        # Tính toán Equity của phần vốn trích ra đánh Bot (Vốn đánh ban đầu + Lãi/Lỗ phát sinh trong phiên)
+        session_pnl = equity - self.session_start_wallet_equity
+        bot_equity = round(float(config.INITIAL_CAPITAL) + session_pnl, 2)
+
         # 1. KIỂM TRA CẦU DAO CHỐT LỜI TỔNG (TARGET CIRCUIT BREAKER - Chương 3.3 v2 - Đơn vị USD)
         bot_running = bool(getattr(config, "BOT_RUNNING", False))
-        if bot_running and self.risk_manager.is_target_goal_reached(equity):
+        if bot_running and self.risk_manager.is_target_goal_reached(bot_equity):
             msg_close = "⚡ Tiến hành đóng toàn bộ vị thế đang mở để chốt bằng đúng số tiền mục tiêu..."
             msg_stop = "🛑 BOT ĐÃ TỰ ĐỘNG DỪNG HOÀN TOÀN TẠI MỨC MỤC TIÊU!"
             print(msg_close)
@@ -526,13 +540,15 @@ class AITradingEngine:
             floating_pnl = 0.0
             equity = balance
             current_equity_vnd = equity * DEFAULT_USD_VND_RATE
+            session_pnl = equity - self.session_start_wallet_equity
+            bot_equity = round(float(config.INITIAL_CAPITAL) + session_pnl, 2)
 
             with get_connection() as conn:
                 cursor = conn.cursor()
                 cursor.execute(
                     "INSERT INTO bot_logs (log_level, module, message) VALUES ('INFO', 'target_breaker', ?);",
                     (
-                        f"🎯 [TARGET REACHED] Equity ${equity:,.2f} USD >= Mục tiêu ${config.TARGET_PROFIT_GOAL:,.2f} USD. "
+                        f"🎯 [TARGET REACHED] Vốn đánh đạt ${bot_equity:,.2f} USD >= Mục tiêu ${config.TARGET_PROFIT_GOAL:,.2f} USD. "
                         f"Đã đóng toàn bộ vị thế trên sàn MT5/Exness và tự động ngắt Bot!",
                     ),
                 )
@@ -542,11 +558,12 @@ class AITradingEngine:
                 "type": "TARGET_GOAL_REACHED",
                 "data": {
                     "equity": round(equity, 2),
+                    "bot_equity": bot_equity,
                     "equity_vnd": round(current_equity_vnd),
                     "target_goal": config.TARGET_PROFIT_GOAL,
                     "custom_lot": config.CUSTOM_LOT_SIZE,
                     "initial_capital": config.INITIAL_CAPITAL,
-                    "message": f"🎯 CẦU DAO CHỐT LỜI TỔNG KÍCH HOẠT: Tài sản đạt ${equity:,.2f} USD (Mục tiêu: ${config.TARGET_PROFIT_GOAL:,.2f} USD). Đã tự động đóng sạch các vị thế và dừng Bot!",
+                    "message": f"🎯 CẦU DAO CHỐT LỜI TỔNG KÍCH HOẠT: Vốn đánh đạt ${bot_equity:,.2f} USD (Mục tiêu: ${config.TARGET_PROFIT_GOAL:,.2f} USD). Đã tự động đóng sạch các vị thế và dừng Bot!",
                 },
             })
 
@@ -594,7 +611,7 @@ class AITradingEngine:
         locked_24h, lock_reason = self.risk_manager.is_locked_24h()
         if not bot_running:
             if self.target_reached_triggered:
-                circuit_status = f"TARGET_REACHED (${equity:,.2f} / ${config.TARGET_PROFIT_GOAL:,.2f} USD)"
+                circuit_status = f"TARGET_REACHED (${bot_equity:,.2f} / ${config.TARGET_PROFIT_GOAL:,.2f} USD)"
             else:
                 circuit_status = "STOPPED"
         elif locked_24h:
@@ -657,6 +674,7 @@ class AITradingEngine:
             "status": "RUNNING" if bot_running else "STOPPED",
             "bot_running": bot_running,
             "initial_capital": config.INITIAL_CAPITAL,
+            "bot_equity": bot_equity,
             "custom_lot": config.CUSTOM_LOT_SIZE,
             "target_goal": config.TARGET_PROFIT_GOAL,
             "equity_vnd": round(current_equity_vnd),

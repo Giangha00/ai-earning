@@ -265,17 +265,8 @@ function handleRealtimeTick(data) {
     const wBalVnd = document.getElementById("wallet-balance-vnd");
     if (wBalVnd) wBalVnd.innerText = `~${balVnd.toLocaleString("vi-VN")} ₫`;
 
-    // Tự động đồng bộ số dư ví Exness trực tiếp vào ô Vốn (#initial_capital) mà không cần nhập
-    const initCapInput = document.getElementById("initial_capital");
-    if (initCapInput) {
-      initCapInput.value = balUsd.toFixed(2);
-    }
-    const subVndEl = document.getElementById("sub-initial-capital-vnd");
-    if (subVndEl) {
-      subVndEl.innerText = `~${balVnd.toLocaleString("vi-VN")} ₫`;
-    }
-
-    updateBotTargetStatusUI(eqUsd, data.target_goal, data.bot_running, data.custom_lot);
+    const botEqUsd = Number(data.bot_equity !== undefined ? data.bot_equity : (data.initial_capital || 100));
+    updateBotTargetStatusUI(botEqUsd, data.target_goal, data.bot_running, data.custom_lot);
   }
 }
 
@@ -512,28 +503,26 @@ async function loadAccountData() {
       realizedEl.style.color = realizedUsd >= 0 ? "var(--color-gold)" : "var(--color-red)";
     }
 
-    // Tự động đồng bộ số dư ví Exness vào ô Vốn (#initial_capital) & cấu hình Bot v2
+    // Đồng bộ cấu hình động Bot v2 (USD) lên UI nếu người dùng chưa đang gõ
     const initCapInput = document.getElementById("initial_capital");
     const customLotInput = document.getElementById("custom_lot");
     const targetGoalInput = document.getElementById("target_goal");
-    if (initCapInput) {
-      initCapInput.value = balUsd.toFixed(2);
+    if (initCapInput && !initCapInput.dataset.modified && data.initial_capital) {
+      initCapInput.value = Number(data.initial_capital);
       const subVndEl = document.getElementById("sub-initial-capital-vnd");
       if (subVndEl) {
-        subVndEl.innerText = `~${Math.round(balUsd * usdToVndRate).toLocaleString("vi-VN")} ₫`;
+        subVndEl.innerText = `~${Math.round(Number(data.initial_capital) * usdToVndRate).toLocaleString("vi-VN")} ₫`;
       }
     }
     if (customLotInput && !customLotInput.dataset.modified && data.custom_lot) {
       customLotInput.value = Number(data.custom_lot).toFixed(2);
     }
-    if (targetGoalInput && !targetGoalInput.dataset.modified) {
-      const defaultTarget = (data.target_goal && Number(data.target_goal) > balUsd)
-        ? Number(data.target_goal)
-        : Math.round(balUsd + 500);
-      targetGoalInput.value = defaultTarget;
+    if (targetGoalInput && !targetGoalInput.dataset.modified && data.target_goal) {
+      targetGoalInput.value = Number(data.target_goal);
     }
+    const botEqUsd = Number(data.bot_equity !== undefined ? data.bot_equity : (data.initial_capital || 100));
     updateBotTargetStatusUI(
-      eqUsd,
+      botEqUsd,
       data.target_goal,
       data.bot_running,
       data.custom_lot

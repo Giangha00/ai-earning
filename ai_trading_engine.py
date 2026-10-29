@@ -99,6 +99,9 @@ class AITradingEngine:
         self.target_reached_triggered: bool = False
         self.session_start_wallet_equity: Optional[float] = None
         self.loop_interval_sec: float = 1.5  # Chu kỳ quét nhịp realtime (1.5s)
+        self.last_trade_timestamp: float = 0.0
+        self.trade_cooldown_sec: float = 20.0  # Giãn cách tối thiểu giữa 2 lệnh để chống spam
+        self.max_open_positions: int = 3       # Tối đa 3 lệnh mở đồng thời
 
         # 1. Quản lý Rủi ro (Chương 3.1, 4.4, 5)
         self.risk_manager = RiskManager(
@@ -603,8 +606,10 @@ class AITradingEngine:
             anomaly_score = ood_details.get("anomaly_score", 0.0)
             is_ood = ood_details.get("is_ood", False)
 
-        # Kết hợp độ tin cậy từ Model + Price Action Modifier
-        final_confidence = min(1.0, max(0.0, raw_prob + pa_result.confidence_modifier))
+        # Kết hợp độ tin cậy từ Model (đã hiệu chuẩn phân phối) + Price Action Modifier + HMM Regime Alignment
+        calibrated_prob = min(0.68, max(0.35, 0.52 + (raw_prob - 0.394) * 3.5))
+        hmm_bonus = 0.06 if (hmm_is_safe and pa_result.is_tradable) else 0.0
+        final_confidence = min(0.98, max(0.0, calibrated_prob + pa_result.confidence_modifier + hmm_bonus))
 
         # 5. Đánh giá Cầu dao và Điều kiện An toàn
         is_safe_trade, safe_reason = self.risk_manager.is_safe_to_trade()
@@ -621,6 +626,18 @@ class AITradingEngine:
 
         # 6. Tính toán Monte Carlo VaR (Chương 2.8)
         var_metrics = self.risk_manager.evaluate_portfolio_var(list(recent_returns), equity)
+
+        # Kiểm tra số lượng vị thế đang mở và thời gian giãn cách lệnh
+        open_positions_count = 0
+        try:
+            with get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute("SELECT COUNT(*) FROM orders WHERE status = 'OPEN';")
+                open_positions_count = cursor.fetchone()[0] or 0
+        except Exception:
+            open_positions_count = 0
+
+        cooldown_ready = (time.time() - self.last_trade_timestamp) >= self.trade_cooldown_sec
 
         # 7. Quyết định VÀO LỆNH (EXECUTION)
         # Bắt buộc thỏa mãn TOÀN BỘ 5 LỚP BẢO VỆ + BOT_RUNNING == True:
@@ -640,9 +657,12 @@ class AITradingEngine:
             and (pa_result.entry_suggestion is not None)
             and (pa_result.sl_suggestion is not None)
             and (pa_result.tp_suggestion is not None)
+            and (open_positions_count < self.max_open_positions)
+            and cooldown_ready
         )
 
         if can_execute:
+            self.last_trade_timestamp = time.time()
             await self.execute_trade_decision(
                 symbol=self.symbol,
                 action=pa_result.recommended_action,

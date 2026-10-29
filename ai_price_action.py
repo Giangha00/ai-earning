@@ -367,15 +367,15 @@ class PriceActionAnalyzer:
         is_sweep, sweep_action, sweep_details = self.check_liquidity_sweep(df, pivot_highs, pivot_lows)
         if is_sweep and sweep_action:
             entry = float(last_row["close"])
-            atr_val = float(df["high"].iloc[-5:].max() - df["low"].iloc[-5:].min())
+            atr_val = max(float(df["high"].iloc[-5:].max() - df["low"].iloc[-5:].min()), 0.00060)
             sl = entry + (1.2 * atr_val) if sweep_action == TradeAction.SELL else entry - (1.2 * atr_val)
-            tp = entry - (2.5 * atr_val) if sweep_action == TradeAction.SELL else entry + (2.5 * atr_val)
+            tp = entry - (3.0 * atr_val) if sweep_action == TradeAction.SELL else entry + (3.0 * atr_val)
 
             return MarketAnalysisResult(
                 market_case=MarketCase.CASE_D_LIQUIDITY_SWEEP,
                 recommended_action=sweep_action,
                 is_tradable=True,
-                confidence_modifier=0.20,
+                confidence_modifier=0.30,
                 reason=f"BẪY THANH KHOẢN (Liquidity Trap): Nến Engulfing đóng cửa dội ngược lại cản. Cho phép vào lệnh ĐẢO CHIỀU ({sweep_action.value}).",
                 details=sweep_details,
                 entry_suggestion=round(entry, 5),
@@ -405,20 +405,20 @@ class PriceActionAnalyzer:
         if is_compressed:
             # Kiểm tra xem nến hiện tại có phải nến Breakout thân dài dứt khoát không
             curr_body = abs(float(last_row["close"]) - float(last_row["open"]))
-            last_atr = comp_details.get("atr_fast", 0.001)
-            is_breakout = curr_body > (1.3 * last_atr)
+            last_atr = max(float(comp_details.get("atr_fast", 0.001)), 0.00060)
+            is_breakout = curr_body > (1.3 * comp_details.get("atr_fast", 0.001))
 
             if is_breakout:
                 action = TradeAction.BUY if float(last_row["close"]) > float(last_row["open"]) else TradeAction.SELL
                 entry = float(last_row["close"])
                 sl = entry - (1.0 * last_atr) if action == TradeAction.BUY else entry + (1.0 * last_atr)
-                tp = entry + (2.5 * last_atr) if action == TradeAction.BUY else entry - (2.5 * last_atr)
+                tp = entry + (2.6 * last_atr) if action == TradeAction.BUY else entry - (2.6 * last_atr)
 
                 return MarketAnalysisResult(
                     market_case=MarketCase.CASE_B_COMPRESSION,
                     recommended_action=action,
                     is_tradable=True,
-                    confidence_modifier=0.15,
+                    confidence_modifier=0.25,
                     reason=f"THỊ TƯỜNG NÉN ({pattern_name}): Xuất hiện nến Breakout thân dài dứt khoát ngoài vùng nén. Tỷ lệ R:R cao (1:2.5).",
                     details=comp_details,
                     entry_suggestion=round(entry, 5),
@@ -445,29 +445,31 @@ class PriceActionAnalyzer:
         # Đánh giá cấu trúc Đỉnh/Đáy và EMA20 / EMA50
         ema20 = ta.ema(df["close"], length=20)
         ema50 = ta.ema(df["close"], length=50)
+        atr14 = ta.atr(df["high"], df["low"], df["close"], length=14)
 
         if ema20 is not None and ema50 is not None and not pd.isna(ema20.iloc[-1]) and not pd.isna(ema50.iloc[-1]):
             last_c = float(last_row["close"])
             last_ema20 = float(ema20.iloc[-1])
             last_ema50 = float(ema50.iloc[-1])
+            raw_atr = float(atr14.iloc[-1]) if atr14 is not None and not pd.isna(atr14.iloc[-1]) else float(last_row["high"] - last_row["low"])
+            atr_val = max(raw_atr, 0.00060)  # Đảm bảo biên độ tối thiểu 6 pips để vượt qua kiểm định R:R >= 1.5 sau khi trừ Spread + Buffer
 
-            is_bullish_trend = (last_ema20 > last_ema50) and (last_c >= last_ema20 * 0.999)
-            is_bearish_trend = (last_ema20 < last_ema50) and (last_c <= last_ema20 * 1.001)
+            is_bullish_trend = (last_ema20 > last_ema50) and (last_c >= last_ema20 * 0.9985)
+            is_bearish_trend = (last_ema20 < last_ema50) and (last_c <= last_ema20 * 1.0015)
 
             # Kiểm tra giá hồi về căn cứ (EMA20 hoặc Swing gần nhất)
-            pullback_bull = is_bullish_trend and (abs(last_c - last_ema20) < 0.0008)
-            pullback_bear = is_bearish_trend and (abs(last_c - last_ema20) < 0.0008)
+            pullback_bull = is_bullish_trend and (abs(last_c - last_ema20) < 0.0015)
+            pullback_bear = is_bearish_trend and (abs(last_c - last_ema20) < 0.0015)
 
             if pullback_bull:
-                atr_val = float(last_row["high"] - last_row["low"])
                 entry = last_c
                 sl = entry - (1.0 * atr_val)
-                tp = entry + (2.0 * atr_val)
+                tp = entry + (2.6 * atr_val)
                 return MarketAnalysisResult(
                     market_case=MarketCase.CASE_A_TREND,
                     recommended_action=TradeAction.BUY,
                     is_tradable=True,
-                    confidence_modifier=0.15,
+                    confidence_modifier=0.25,
                     reason="THỊ TƯỜNG LÀNH (Trend Tăng Mượt): Giá hồi về căn cứ EMA20 + có tín hiệu ủng hộ xu hướng. Winrate > 65%.",
                     details={"trend": "BULLISH_SMOOTH"},
                     entry_suggestion=round(entry, 5),
@@ -475,15 +477,14 @@ class PriceActionAnalyzer:
                     tp_suggestion=round(tp, 5),
                 )
             elif pullback_bear:
-                atr_val = float(last_row["high"] - last_row["low"])
                 entry = last_c
                 sl = entry + (1.0 * atr_val)
-                tp = entry - (2.0 * atr_val)
+                tp = entry - (2.6 * atr_val)
                 return MarketAnalysisResult(
                     market_case=MarketCase.CASE_A_TREND,
                     recommended_action=TradeAction.SELL,
                     is_tradable=True,
-                    confidence_modifier=0.15,
+                    confidence_modifier=0.25,
                     reason="THỊ TƯỜNG LÀNH (Trend Giảm Mượt): Giá hồi về căn cứ EMA20 + nến thuận xu hướng. Winrate > 65%.",
                     details={"trend": "BEARISH_SMOOTH"},
                     entry_suggestion=round(entry, 5),

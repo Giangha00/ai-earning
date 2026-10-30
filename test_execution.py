@@ -255,6 +255,45 @@ def test_v2_custom_lot_and_target_circuit_breaker():
     print("\n🎉 TẤT CẢ 6 BÀI TEST (BAO GỒM NÂNG CẤP V2) ĐÃ VƯỢT QUA 100% HOÀN HẢO!")
 
 
+def test_spread_filter_commission_and_lot_1r():
+    print("\n" + "=" * 50)
+    print("TEST 7: BỘ LỌC SPREAD, COMMISSION ROUND-TURN & CÔNG THỨC LOT 1R CHUẨN")
+    print("=" * 50)
+
+    from mt5_connector import get_current_spread_pips
+
+    MT5Connector.connect()
+    rm = RiskManager()
+
+    # 1. Kiểm tra đo Spread thực tế & MAX_ALLOWED_SPREAD (Mục 2 PDF)
+    spread_eur = get_current_spread_pips("EURUSD")
+    limit_eur = config.MAX_ALLOWED_SPREAD.get("EURUSD", config.MAX_ALLOWED_SPREAD["DEFAULT"])
+    print(f"-> Spread EURUSD hiện tại: {spread_eur} pips (Trần cho phép: {limit_eur} pips)")
+    assert spread_eur <= limit_eur
+
+    # 2. Kiểm tra Công thức tính Lot chuẩn 1R gộp phí hoa hồng 7 USD/lot (Ví dụ thực tế Mục 4 & 5 PDF)
+    # Vốn 10,000 USD, Rủi ro 1% (1R = 100 USD), SL = 20 pips, Pip value = 10 USD, Commission = 7 USD/lot
+    # Mẫu số: (20 * 10) + 7 = 207 USD/lot -> Raw lot: 100 / 207 = 0.483 -> Làm tròn xuống: 0.48 Lot
+    config.USE_CUSTOM_LOT = False
+    lot_std = rm.calculate_standard_lot(balance=10000.0, sl_pips=20.0, pip_value=10.0)
+    total_sl_loss = (lot_std * 20.0 * 10.0) + (lot_std * 7.0)
+    print(f"-> Lot chuẩn 1R (Vốn $10,000, SL 20 pips, Comm $7/lot): {lot_std} Lot | Tổng lỗ khi dính SL: ${total_sl_loss:.2f} <= $100.00")
+    assert lot_std == 0.48
+    assert round(total_sl_loss, 2) == 99.36
+    assert total_sl_loss <= 100.0
+
+    # 3. Kiểm tra Công thức Take Profit (2R) bù thêm Buffer Pips (+0.7 pips) (Mục 3 & 5 PDF)
+    entry = 1.10000
+    sl = 1.09800  # SL distance = 20 pips (0.00200)
+    tp_buy = rm.calculate_tp_with_buffer(entry=entry, sl=sl, order_type="BUY", point=0.0001)
+    # TP distance = 40 pips (0.00400) + 0.7 pips (0.00007) = 0.00407 -> TP = 1.10407
+    print(f"-> TP BUY có bù 0.7 Buffer Pips (Entry={entry:.5f}, SL={sl:.5f}): TP={tp_buy:.5f}")
+    assert tp_buy == 1.10407
+
+    MT5Connector.disconnect()
+    print("\n🎉 TẤT CẢ 7 BÀI TEST (BAO GỒM BỘ LỌC SPREAD, COMMISSION 7 USD/LOT & LOT 1R) ĐÃ VƯỢT QUA 100%!")
+
+
 if __name__ == "__main__":
     test_price_action_and_market_cases()
     test_ml_dl_math_formulas()
@@ -262,3 +301,4 @@ if __name__ == "__main__":
     test_risk_management_and_circuit_breaker()
     test_full_trade_execution()
     test_v2_custom_lot_and_target_circuit_breaker()
+    test_spread_filter_commission_and_lot_1r()

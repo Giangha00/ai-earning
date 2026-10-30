@@ -678,10 +678,16 @@ def close_order(ticket_id: int):
             raise HTTPException(status_code=404, detail="Không tìm thấy lệnh mở với Ticket này")
 
         symbol, o_type, lot_size, open_price, take_profit = row
-        close_price = take_profit if take_profit else open_price
+        tick = mt5.symbol_info_tick(symbol) if mt5 else None
+        if tick is not None:
+            close_price = float(tick.bid if o_type == "BUY" else tick.ask)
+        else:
+            close_price = take_profit if take_profit else open_price
 
         mult = 100.0 if "XAU" in symbol or "GOLD" in symbol else 100000.0
-        profit = (close_price - open_price) * mult * lot_size if o_type == "BUY" else (open_price - close_price) * mult * lot_size
+        gross_profit = (close_price - open_price) * mult * lot_size if o_type == "BUY" else (open_price - close_price) * mult * lot_size
+        comm_per_lot = float(getattr(config, "COMMISSION_PER_LOT_USD", 7.0))
+        profit = round(gross_profit - (float(lot_size) * comm_per_lot), 2)
 
         cursor.execute("""
             UPDATE orders 

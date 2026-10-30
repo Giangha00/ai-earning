@@ -210,7 +210,21 @@ except (ImportError, ModuleNotFoundError):
 
         @classmethod
         def account_info(cls):
-            return MockAccountInfo(config.MT5_LOGIN, config.MT5_SERVER, cls._account_balance)
+            acc = MockAccountInfo(config.MT5_LOGIN, config.MT5_SERVER, cls._account_balance)
+            # Tính Equity thực tế tự động trừ sạch phí Commission (7 USD/lot) và Spread thả nổi theo thời gian thực (Mục 6 PDF)
+            floating_net = 0.0
+            comm_per_lot = float(getattr(config, "COMMISSION_PER_LOT_USD", 7.0))
+            for pos in cls._positions.values():
+                is_gold = "XAU" in pos.symbol or "GOLD" in pos.symbol
+                key = "XAUUSD" if is_gold else "EURUSD"
+                bid_p = cls._last_prices.get(key, pos.price_open)
+                spread_val = 0.30 if is_gold else 0.00015
+                ask_p = round(bid_p + spread_val, 2 if is_gold else 5)
+                mult = 100.0 if is_gold else 100000.0
+                gross = (bid_p - pos.price_open) * mult * pos.volume if pos.type == cls.POSITION_TYPE_BUY else (pos.price_open - ask_p) * mult * pos.volume
+                floating_net += gross - (pos.volume * comm_per_lot)
+            acc.equity = round(acc.balance + floating_net, 2)
+            return acc
 
         @staticmethod
         def symbols_total() -> int:
@@ -323,6 +337,21 @@ except (ImportError, ModuleNotFoundError):
     mt5 = MockMT5()
     import sys
     sys.modules.setdefault("MetaTrader5", mt5)
+
+
+def get_current_spread_pips(symbol: str) -> float:
+    """
+    Hàm đo Spread thực tế từ MT5 quy đổi sang đơn vị Pips (Mục 2.2 Tài liệu Nâng cấp):
+    - Trước mỗi lần chuẩn bị phát lệnh order_send(), lấy báo giá thực tế ask và bid.
+    - Nếu không lấy được tick hoặc symbol_info, trả về 999.0 để chặn lệnh an toàn.
+    """
+    tick = mt5.symbol_info_tick(symbol)
+    info = mt5.symbol_info(symbol)
+    if not tick or not info:
+        return 999.0
+    raw_spread = tick.ask - tick.bid
+    divider = (info.point * 10) if info.digits in [3, 5] else info.point
+    return round(raw_spread / divider, 2)
 
 
 class MT5Connector:

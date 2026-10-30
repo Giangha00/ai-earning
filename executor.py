@@ -212,11 +212,13 @@ def close_all_positions() -> int:
             )
             open_orders = cursor.fetchall()
             realized_delta = 0.0
+            comm_per_lot = float(getattr(config, "COMMISSION_PER_LOT_USD", 7.0))
             for ticket_id, sym, o_type, lot, o_price in open_orders:
                 tick = mt5.symbol_info_tick(sym)
                 close_price = float(tick.bid if o_type == "BUY" else tick.ask) if tick else float(o_price)
                 mult = 100.0 if "XAU" in sym or "GOLD" in sym else 100000.0
-                profit = (close_price - o_price) * mult * lot if o_type == "BUY" else (o_price - close_price) * mult * lot
+                gross_profit = (close_price - o_price) * mult * lot if o_type == "BUY" else (o_price - close_price) * mult * lot
+                profit = round(gross_profit - (float(lot) * comm_per_lot), 2)
                 realized_delta += profit
 
                 cursor.execute(

@@ -71,6 +71,44 @@ class RiskManager:
             return round(float(custom_lot), 2)
         return 0.01  # Mặc định an toàn
 
+    def calculate_standard_lot(self, balance: float, sl_pips: float, pip_value: float = 10.0) -> float:
+        """
+        Tính Lot Size chuẩn gộp cả phí hoa hồng để chỉ mất đúng 1R (Mục 4 & 5 Tài liệu Nâng cấp):
+        Lot Size = (Tổng Vốn * % Rủi Ro) / [ (SL Pips * Pip Value) + Commission Per Lot ]
+        """
+        if getattr(config, "USE_CUSTOM_LOT", False) and config.CUSTOM_LOT_SIZE > 0:
+            return config.CUSTOM_LOT_SIZE
+        risk_money = balance * getattr(config, "RISK_PER_TRADE", 0.01)
+        comm_per_lot = getattr(config, "COMMISSION_PER_LOT_USD", 7.0)
+        cost_per_lot = (sl_pips * pip_value) + comm_per_lot
+        if cost_per_lot <= 0:
+            return 0.01
+        raw_lot = risk_money / cost_per_lot
+        return max(0.01, round(raw_lot - 0.005, 2))  # Làm tròn xuống bước 0.01
+
+    def calculate_tp_with_buffer(self, entry: float, sl: float, order_type: str, point: float = 0.0001) -> float:
+        """
+        Tính mức Take Profit (2R) có bù thêm Buffer Pips để bù phí sàn (Mục 3 & 5 Tài liệu Nâng cấp):
+        - Buffer Pips = Phí Round-Turn trên 1 Lot (USD) / Giá trị 1 Pip của 1 Lot (USD) (VD: 7 / 10 = 0.7 Pips)
+        - TP Distance = (Stop Loss Distance * 2) + Buffer Pips
+        """
+        sl_distance = abs(entry - sl)
+        pip_size = point * 10 if point in (0.00001, 0.001) else point
+        buffer_dist = getattr(config, "COMMISSION_BUFFER_PIPS", 0.7) * pip_size
+        tp_distance = (sl_distance * 2.0) + buffer_dist
+        return round(entry + tp_distance if order_type.upper() == "BUY" else entry - tp_distance, 5)
+
+    def check_target_goal(self, current_equity: Optional[float] = None) -> bool:
+        """
+        Kiểm tra điều kiện ngắt Bot đạt mục tiêu (Mục 6 Tài liệu Nâng cấp):
+        Luôn đọc giá trị Equity (thay vì Balance) từ MT5 vì Equity đã tự động trừ sạch
+        toàn bộ phí Commission và Spread thả nổi theo thời gian thực.
+        """
+        if current_equity is None:
+            acc = mt5.account_info()
+            current_equity = float(getattr(acc, "equity", getattr(config, "INITIAL_CAPITAL", 0.0)))
+        return self.is_target_goal_reached(current_equity)
+
     def is_target_goal_reached(self, current_equity: float) -> bool:
         """
         Cầu dao chốt lời tổng (Target Profit Circuit Breaker - v2):
@@ -251,22 +289,20 @@ class RiskManager:
         if d_risk <= 0:
             return 0.0, one_r_money, 0.0
 
-        # Số ticks chịu rủi ro và giá trị tổn thất trên 1 standard lot
+        # Số ticks chịu rủi ro và giá trị tổn thất trên 1 standard lot (gộp cả phí hoa hồng Round-Turn 7 USD/lot - Mục 4 PDF)
         risk_ticks = d_risk / tick_size
-        risk_per_standard_lot = risk_ticks * tick_value
+        comm_per_lot = float(getattr(config, "COMMISSION_PER_LOT_USD", 7.0))
+        risk_per_standard_lot = (risk_ticks * tick_value) + comm_per_lot
 
         if risk_per_standard_lot <= 0:
             return 0.0, one_r_money, d_risk
 
-        # Khối lượng raw lot
+        # Khối lượng raw lot làm tròn xuống bước 0.01
         raw_lot = one_r_money / risk_per_standard_lot
+        calculated_lot = max(0.01, round(raw_lot - 0.005, 2))
 
-        # Chuẩn hóa theo volume_step của broker
-        lot_step = symbol_info.volume_step
         min_lot = symbol_info.volume_min
         max_lot = symbol_info.volume_max
-
-        calculated_lot = (raw_lot // lot_step) * lot_step
 
         if calculated_lot < min_lot:
             calculated_lot = min_lot

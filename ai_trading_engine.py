@@ -25,7 +25,7 @@ import time
 import config as config_module
 from config import BASE_DIR, config
 from db import get_connection
-from mt5_connector import mt5, MT5Connector, IS_SIMULATION
+from mt5_connector import mt5, MT5Connector, IS_SIMULATION, get_current_spread_pips
 from executor import MT5Executor, close_all_positions
 from risk_manager import RiskManager
 from ai_price_action import PriceActionAnalyzer, MarketCase, TradeAction, MarketAnalysisResult
@@ -45,6 +45,7 @@ def get_account_balance(usd_vnd_rate: float = DEFAULT_USD_VND_RATE) -> Dict[str,
     balance_usd = float(getattr(acc, "balance", getattr(config, "MT5_BALANCE", 1000.0)))
 
     floating_pnl_usd = 0.0
+    comm_per_lot = float(getattr(config, "COMMISSION_PER_LOT_USD", 7.0))
     try:
         with get_connection() as conn:
             cursor = conn.cursor()
@@ -57,8 +58,9 @@ def get_account_balance(usd_vnd_rate: float = DEFAULT_USD_VND_RATE) -> Dict[str,
                     continue
                 cur_p = float(tick.bid if o_type == "BUY" else tick.ask)
                 mult = 100.0 if "XAU" in sym or "GOLD" in sym else 100000.0
-                pnl = (cur_p - o_price) * mult * lot if o_type == "BUY" else (o_price - cur_p) * mult * lot
-                floating_pnl_usd += pnl
+                gross_pnl = (cur_p - o_price) * mult * lot if o_type == "BUY" else (o_price - cur_p) * mult * lot
+                net_pnl = gross_pnl - (float(lot) * comm_per_lot)
+                floating_pnl_usd += net_pnl
     except Exception:
         pass
 
@@ -330,29 +332,61 @@ class AITradingEngine:
         anomaly_score: float,
         reason: str,
     ):
-        """Thực thi lệnh giao dịch khi đã vượt qua toàn bộ 5 lớp màng lọc."""
-        # Kiểm tra tỷ lệ R:R >= 1.5
+        """Thực thi lệnh giao dịch khi đã vượt qua toàn bộ 5 lớp màng lọc + Bộ lọc Max Spread & Bù phí Commission."""
+        # 1. BỘ LỌC SPREAD THỜI GIAN THỰC (MAX SPREAD FILTER - Mục 2 Tài liệu Nâng cấp)
+        spread = get_current_spread_pips(symbol)
+        limit = config.MAX_ALLOWED_SPREAD.get(symbol, config.MAX_ALLOWED_SPREAD["DEFAULT"])
+        if spread > limit:
+            print(f"🚫 CHẶN LỆNH: Spread {spread} pips > trần {limit} pips. Bỏ qua!")
+            logging.warning(f"🚫 CHẶN LỆNH [{symbol}]: Spread {spread} pips > trần {limit} pips. Bỏ qua!")
+            return False
+
+        # Lấy giá khớp thực tế từ tick (BUY khớp tại Ask, SELL khớp tại Bid)
+        tick = mt5.symbol_info_tick(symbol)
+        info = mt5.symbol_info(symbol)
+        point = float(getattr(info, "point", 0.00001)) if info else 0.00001
+        pip_size = (point * 10.0) if (info and getattr(info, "digits", 5) in [3, 5]) else 0.0001
+        raw_spread = float(tick.ask - tick.bid) if tick else (spread * pip_size)
+        if tick:
+            entry_price = float(tick.ask if action == TradeAction.BUY else tick.bid)
+
+        # 2. QUY ĐỔI PHÍ COMMISSION SANG BUFFER PIPS CHO TAKE PROFIT (Mục 3 & 5 Tài liệu Nâng cấp)
+        tp_price = self.risk_manager.calculate_tp_with_buffer(
+            entry=entry_price,
+            sl=sl_price,
+            order_type=action.value,
+            point=point,
+        )
+
+        # 3. Kiểm tra tỷ lệ R:R >= 1.5
         rr_valid, calc_rr, d_risk, d_reward, rr_msg = self.risk_manager.check_rr_ratio(
             entry_price=entry_price,
             sl_price=sl_price,
             tp_price=tp_price,
+            spread=raw_spread,
+            point=point,
         )
         if not rr_valid:
             logging.info(f"[{symbol}] Bỏ qua lệnh: {rr_msg}")
-            return
+            return False
 
-        # Ưu tiên sử dụng Số Lot cố định do người dùng chỉ định (Custom Lot Size - v2)
+        # 4. TÍNH LOT SIZE CHUẨN GỘP CẢ PHÍ HOA HỒNG ROUND-TURN (Mục 4 & 5 Tài liệu Nâng cấp)
+        sl_pips = max(1.0, abs(entry_price - sl_price) / pip_size)
+        acc = mt5.account_info()
+        cap_base = float(getattr(config, "INITIAL_CAPITAL", 0.0)) or float(getattr(acc, "equity", 10000.0))
+        std_lot = self.risk_manager.calculate_standard_lot(balance=cap_base, sl_pips=sl_pips, pip_value=10.0)
         custom_lot = self.risk_manager.get_execution_lot()
         _, one_r_money, _ = self.risk_manager.calculate_lot_size_1r(
             symbol=symbol,
             entry_price=entry_price,
             sl_price=sl_price,
+            spread=raw_spread,
         )
-        lot_size = custom_lot if custom_lot > 0 else 0.01
+        lot_size = custom_lot if custom_lot > 0 else std_lot
 
         if lot_size <= 0:
             logging.warning(f"[{symbol}] Lot size tính toán không hợp lệ ({lot_size}).")
-            return
+            return False
 
         # Gửi lệnh lên sàn MT5 / MockMT5
         ticket = MT5Executor.open_position(
@@ -384,7 +418,10 @@ class AITradingEngine:
             """, (now_str, symbol, action.value, confidence * 100.0, 50.0, d_risk, 25.0, market_case.value, regime, anomaly_score, calc_rr, reason, 1 if ticket else 0, ticket))
 
             # Ghi vào bot_logs
-            log_msg = f"AI kích hoạt lệnh {action.value} #{ticket} {lot_size} lot tại {entry_price:.5f} | SL: {sl_price:.5f} | TP: {tp_price:.5f} | R:R: 1:{calc_rr:.2f} | Case: {market_case.value} | 1R: ${one_r_money:.2f}"
+            log_msg = (
+                f"AI kích hoạt lệnh {action.value} #{ticket} {lot_size} lot tại {entry_price:.5f} | "
+                f"SL: {sl_price:.5f} | TP (bù phí): {tp_price:.5f} | Spread: {spread} pips | R:R: 1:{calc_rr:.2f} | Case: {market_case.value}"
+            )
             cursor.execute("INSERT INTO bot_logs (log_level, module, message) VALUES ('INFO', 'ai_engine', ?);", (log_msg,))
             conn.commit()
 
@@ -404,26 +441,42 @@ class AITradingEngine:
                 "confidence": confidence * 100.0,
             }
         })
+        return True
 
-    async def update_open_positions_pnl(self, current_price: float) -> float:
-        """Cập nhật floating PnL cho các vị thế mở và kiểm tra TP/SL."""
+    async def update_open_positions_pnl(self, current_price: float, current_bid: Optional[float] = None) -> float:
+        """
+        Cập nhật floating PnL thực tế cho các vị thế mở (đã trừ Spread Bid/Ask và phí Hoa hồng Round-Turn 7 USD/lot)
+        và kiểm tra chạm TP/SL (Mục 3 & 6 Tài liệu Nâng cấp).
+        """
         total_floating_pnl = 0.0
+        comm_per_lot = float(getattr(config, "COMMISSION_PER_LOT_USD", 7.0))
         with get_connection() as conn:
             cursor = conn.cursor()
             cursor.execute("SELECT ticket_id, symbol, order_type, lot_size, open_price, stop_loss, take_profit FROM orders WHERE status = 'OPEN';")
             open_orders = cursor.fetchall()
 
             for ticket, sym, o_type, lot, o_price, sl, tp in open_orders:
+                tick = mt5.symbol_info_tick(sym)
+                bid_p = float(current_bid if current_bid is not None else (tick.bid if tick else current_price))
+                ask_p = float(tick.ask if tick else current_price)
                 mult = 100.0 if "XAU" in sym or "GOLD" in sym else 100000.0
-                if o_type == "BUY":
-                    profit = (current_price - o_price) * mult * lot
-                    hit_tp = tp and current_price >= tp
-                    hit_sl = sl and current_price <= sl
-                else:
-                    profit = (o_price - current_price) * mult * lot
-                    hit_tp = tp and current_price <= tp
-                    hit_sl = sl and current_price >= sl
 
+                if o_type == "BUY":
+                    # Lệnh BUY mở ở Ask, đóng ở Bid
+                    close_eval_price = bid_p
+                    gross_profit = (close_eval_price - o_price) * mult * lot
+                    hit_tp = tp and close_eval_price >= tp
+                    hit_sl = sl and close_eval_price <= sl
+                else:
+                    # Lệnh SELL mở ở Bid, đóng ở Ask
+                    close_eval_price = ask_p
+                    gross_profit = (o_price - close_eval_price) * mult * lot
+                    hit_tp = tp and close_eval_price <= tp
+                    hit_sl = sl and close_eval_price >= sl
+
+                # Luôn trừ phí hoa hồng Round-Turn (7 USD / lot) để phản ánh đúng lợi nhuận ròng trên Ví thực
+                commission_fee = float(lot) * comm_per_lot
+                profit = round(gross_profit - commission_fee, 2)
                 total_floating_pnl += profit
 
                 # Tự động đóng lệnh nếu chạm TP hoặc SL
@@ -434,13 +487,13 @@ class AITradingEngine:
                         UPDATE orders 
                         SET close_time = ?, close_price = ?, profit = ?, close_reason = ?, status = 'CLOSED'
                         WHERE ticket_id = ?;
-                    """, (close_time, current_price, profit, reason, ticket))
+                    """, (close_time, close_eval_price, profit, reason, ticket))
 
                     # Báo cho RiskManager để theo dõi chuỗi thua và cầu dao 2R
                     one_r = 10000.0 * 0.01
                     self.risk_manager.record_trade_result(profit, one_r)
 
-                    # Cộng/trừ lợi nhuận thực tế vào số dư tài khoản
+                    # Cộng/trừ lợi nhuận ròng thực tế (đã trừ Spread + Commission) vào số dư tài khoản
                     acc = mt5.account_info()
                     if acc is not None:
                         from db import set_setting
@@ -450,8 +503,13 @@ class AITradingEngine:
                         if hasattr(mt5, "set_balance"):
                             mt5.set_balance(new_bal)
 
-                    cursor.execute("INSERT INTO bot_logs (log_level, module, message) VALUES ('INFO', 'order_close', ?);",
-                                   (f"Lệnh #{ticket} đã chốt ({reason}) tại {current_price:.5f}, Lợi nhuận: ${profit:.2f}",))
+                    cursor.execute(
+                        "INSERT INTO bot_logs (log_level, module, message) VALUES ('INFO', 'order_close', ?);",
+                        (
+                            f"Lệnh #{ticket} đã chốt ({reason}) tại {close_eval_price:.5f}, "
+                            f"Lợi nhuận ròng (đã trừ phí ${commission_fee:.2f}): ${profit:.2f}",
+                        ),
+                    )
 
             conn.commit()
         return total_floating_pnl
@@ -464,14 +522,15 @@ class AITradingEngine:
             return
 
         current_price = float(tick.ask)
+        current_bid = float(tick.bid)
         spread_val = float(tick.ask - tick.bid)
         spread_pts = round(spread_val * 100000, 1)
 
         # Cập nhật tick vào nến
         self.update_live_candle_tick(current_price, spread_val)
 
-        # Cập nhật floating PnL của các lệnh đang chạy
-        floating_pnl = await self.update_open_positions_pnl(current_price)
+        # Cập nhật floating PnL của các lệnh đang chạy (truyền cả Ask và Bid thực tế)
+        floating_pnl = await self.update_open_positions_pnl(current_price, current_bid=current_bid)
 
         # Thông tin tài khoản ví Exness thực tế (USD)
         acc = mt5.account_info()

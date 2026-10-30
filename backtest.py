@@ -5,7 +5,8 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 
-from config import BASE_DIR
+from config import BASE_DIR, config
+from risk_manager import RiskManager
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - [%(levelname)s] - %(message)s")
 
@@ -92,14 +93,22 @@ class Backtester:
                 # Giá vào lệnh BUY = Close + Spread
                 entry_price = close_price + spread
                 sl_price = entry_price - (self.sl_multiplier * atr)
-                tp_price = entry_price + (self.tp_multiplier * atr)
+                rm_helper = RiskManager()
+                tp_price = rm_helper.calculate_tp_with_buffer(
+                    entry=entry_price,
+                    sl=sl_price,
+                    order_type="BUY",
+                    point=point,
+                )
 
                 risk_distance = entry_price - sl_price
                 if risk_distance <= 0:
                     i += 1
                     continue
 
-                # Quản trị vốn: Số tiền chấp nhận rủi ro trên 1 lệnh
+                # Quản trị vốn chuẩn 1R gộp phí hoa hồng Round-Turn 7 USD/lot (Mục 4, 5, 6 Tài liệu Nâng cấp)
+                sl_pips = max(1.0, risk_distance / (10 * point))
+                lot = rm_helper.calculate_standard_lot(balance=balance, sl_pips=sl_pips, pip_value=10.0)
                 risk_amount = balance * self.risk_per_trade
 
                 # Quét các cây nến tiếp theo
@@ -137,9 +146,12 @@ class Backtester:
                     exit_reason = "TIME_OUT"
                     bars_held = self.horizon_bars
 
-                # Tính PnL
-                pnl_ratio = (exit_price - entry_price) / risk_distance
-                pnl_money = risk_amount * pnl_ratio
+                # Tính PnL ròng: net_profit = gross_profit - (lot * 7.0) (Mục 6 Tài liệu Nâng cấp)
+                pip_diff = (exit_price - entry_price) / (10 * point)
+                gross_profit = pip_diff * 10.0 * lot
+                comm_per_lot = float(getattr(config, "COMMISSION_PER_LOT_USD", 7.0))
+                net_profit = gross_profit - (lot * comm_per_lot)
+                pnl_money = net_profit
                 balance += pnl_money
 
                 # Ghi nhận trade

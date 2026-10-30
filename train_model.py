@@ -243,10 +243,13 @@ class ModelTrainer:
             "datasets_used": [
                 "arvind7754/btc-candlestick-dataset",
                 "tripolskypetr/tradingview-ideas-signals",
+                "jukik45/mt5_eurusd",
+                "akashkumar5/EURUSD-15M-RegimeBench",
+                "vichetkao/xauusd_dataset_2026",
                 "MT5_EXNESS_EURUSD",
             ],
             "pool_metadata": pool_metadata,
-            "version": "2.2.0_HF_MultiDataset_TrainingPool_RR1_2",
+            "version": "2.3.0_HF_6Dataset_MegaPool_RR1_2",
         }
         joblib.dump(payload, lgbm_path)
         joblib.dump(payload, std_model_path)

@@ -145,6 +145,19 @@ def get_ai_status():
     return engine.latest_state
 
 
+@app.get("/api/training_pool")
+def get_training_pool_info():
+    """Trả về thông tin chi tiết của Multi-Dataset Training Pool (2 bộ HuggingFace + MT5 Exness) & kết quả huấn luyện AI."""
+    import json
+    meta_path = BASE_DIR / "data" / "hf_datasets" / "pool_metadata.json"
+    if meta_path.exists():
+        try:
+            return json.loads(meta_path.read_text(encoding="utf-8"))
+        except Exception as e:
+            logging.warning(f"Lỗi đọc pool_metadata.json: {e}")
+    return {"status": "empty"}
+
+
 @app.get("/api/account")
 def get_account_info():
     """Lấy thông tin tài khoản MT5 và quy đổi VNĐ với dữ liệu thật."""

@@ -1,16 +1,28 @@
 """
 Module train_model.py
 Hiện thực hóa Bước 4 (HƯỚNG DẪN THIẾT LẬP TRAINING POOL DATASET) & CHƯƠNG 2, 4, 5:
-- Đọc trực tiếp từ data/training_pool.csv (hoặc fallback data/processed_dataset.parquet).
+- Đọc trực tiếp từ Multi-Dataset Training Pool (data/training_pool.csv hoặc data/processed_dataset.parquet)
+  đã hợp nhất:
+  1. HuggingFace Dataset 1: arvind7754/btc-candlestick-dataset (13,081 mẫu nến BTC)
+  2. HuggingFace Dataset 2: tripolskypetr/tradingview-ideas-signals (51,963 ideas + 22,384 nến M5)
+  3. MT5 / Exness Historical Candlesticks (20,000 nến)
 - Chia tỷ lệ chuẩn: Train (70%), Validation (15%), Test (15%).
-- Huấn luyện mô hình AI (LightGBM / Logistic Regression + Gaussian HMM + Isolation Forest OOD Filter)
-  với ngưỡng tự tin Confidence Score >= 0.75 (75%) và kiểm định Precision >= 70%.
+- Huấn luyện toàn diện 5 mô hình AI:
+  1. LightGBM Classifier (Gradient Boosting)
+  2. Vectorized Logistic Regression (Sigmoid + Binary Cross-Entropy)
+  3. Deep Multi-Layer Perceptron (L2 Regularization + Inverted Dropout)
+  4. Gaussian Hidden Markov Model (3 Market Regimes: Bullish, Bearish, High Volatility Chaos)
+  5. Isolation Forest OOD Filter (Out-of-Distribution Anomaly Detection)
+- Đánh giá với ngưỡng tự tin Confidence Score >= 0.75 (75%) và kiểm định Precision >= 70%.
 - Xuất đồng thời models/model.pkl và models/lgbm_forex_model.pkl.
 """
 
+import json
 import logging
-from typing import List, Dict, Any
+from datetime import datetime
 from pathlib import Path
+from typing import List, Dict, Any
+
 import joblib
 import lightgbm as lgb
 import numpy as np
@@ -26,6 +38,7 @@ from sklearn.metrics import (
 from config import BASE_DIR
 from ai_math_models import (
     VectorizedLogisticRegression,
+    DeepMLPNetwork,
     MarketHMMRegimeDetector,
     OutOfDistributionFilter,
 )
@@ -40,12 +53,19 @@ class ModelTrainer:
         self.models_dir.mkdir(parents=True, exist_ok=True)
 
         self.ignore_cols = [
-            "time", "open", "high", "low", "close", "tick_volume",
-            "spread", "real_volume", "target"
+            "time",
+            "open",
+            "high",
+            "low",
+            "close",
+            "tick_volume",
+            "spread",
+            "real_volume",
+            "target",
         ]
 
     def load_data(self) -> pd.DataFrame:
-        logging.info(f"Đang nạp Training Pool dataset từ {self.dataset_path}...")
+        logging.info(f"Đang nạp Multi-Dataset Training Pool từ {self.dataset_path}...")
         if str(self.dataset_path).endswith(".csv"):
             df = pd.read_csv(self.dataset_path)
         else:
@@ -58,7 +78,7 @@ class ModelTrainer:
         X = df[features]
         y = df["target"].astype(int)
 
-        logging.info(f"Tổng số features trong Training Pool: {len(features)} -> {features}")
+        logging.info(f"Tổng số dòng trong Training Pool: {len(df):,} | Số features: {len(features)} -> {features}")
         n = len(df)
         train_end = int(n * 0.70)
         val_end = int(n * 0.85)
@@ -74,7 +94,7 @@ class ModelTrainer:
 
     def train_classifier(self, X_train, y_train, X_val, y_val):
         """Huấn luyện mô hình phân loại dự đoán xác suất thắng (Confidence Score)."""
-        logging.info("Huấn luyện mô hình AI Gradient Boosting & Logistic Regression trên Training Pool...")
+        logging.info("Huấn luyện mô hình AI LightGBM Gradient Boosting trên Multi-Dataset Training Pool...")
 
         params = {
             "objective": "binary",
@@ -99,16 +119,36 @@ class ModelTrainer:
         ]
 
         model.fit(X_train, y_train, eval_set=[(X_val, y_val)], callbacks=callbacks)
-        logging.info(f"Huấn luyện hoàn tất! Best iteration: {model.best_iteration_}")
+        logging.info(f"Huấn luyện LightGBM hoàn tất! Best iteration: {model.best_iteration_}")
         return model
 
     def train_logistic_baseline(self, X_train: pd.DataFrame, y_train: pd.Series) -> VectorizedLogisticRegression:
-        """Huấn luyện Vectorized Logistic Regression với Sigmoid (Bước 4)."""
+        """Huấn luyện Vectorized Logistic Regression với Sigmoid (Chương 2.1 - 2.4)."""
+        logging.info("Huấn luyện Vectorized Logistic Regression (Sigmoid + Binary Cross-Entropy)...")
         logreg = VectorizedLogisticRegression(learning_rate=0.05, iterations=300)
         X_vals = X_train.values
         X_norm = (X_vals - X_vals.mean(axis=0)) / (X_vals.std(axis=0) + 1e-8)
         logreg.fit(X_norm.T, y_train.values.reshape(1, -1))
         return logreg
+
+    def train_deep_mlp(self, X_train: pd.DataFrame, y_train: pd.Series, epochs: int = 120) -> DeepMLPNetwork:
+        """Huấn luyện mạng nơ-ron sâu Deep MLP với L2 Regularization & Inverted Dropout (Chương 2.5 & 4.1-4.2)."""
+        logging.info("Huấn luyện Deep MLP Network (L2 Regularization lambda=0.01 & Inverted Dropout keep_prob=0.8)...")
+        X_vals = X_train.values
+        X_norm = ((X_vals - X_vals.mean(axis=0)) / (X_vals.std(axis=0) + 1e-8)).T
+        Y_mat = y_train.values.reshape(1, -1).astype(float)
+
+        mlp = DeepMLPNetwork(
+            layer_dims=[X_norm.shape[0], 32, 16, 1],
+            learning_rate=0.02,
+            l2_lambda=0.01,
+            keep_prob=0.8,
+        )
+        for _ in range(epochs):
+            AL, caches = mlp.forward_propagation(X_norm, training=True)
+            grads = mlp.backward_propagation_with_l2(AL, Y_mat, caches)
+            mlp.update_parameters(grads)
+        return mlp
 
     def train_hmm(self, df: pd.DataFrame) -> MarketHMMRegimeDetector:
         """Huấn luyện Gaussian HMM tách 3 trạng thái thị trường (Bullish, Bearish, High Volatility Chaos)."""
@@ -159,24 +199,54 @@ class ModelTrainer:
         self,
         model,
         logreg_model: VectorizedLogisticRegression,
+        deep_mlp: DeepMLPNetwork,
         features: List[str],
         hmm_detector: MarketHMMRegimeDetector,
         ood_filter: OutOfDistributionFilter,
         metrics: Dict[str, float],
+        total_rows: int,
     ):
         """Lưu toàn bộ pipeline AI vào cả models/model.pkl và models/lgbm_forex_model.pkl."""
         lgbm_path = self.models_dir / "lgbm_forex_model.pkl"
         std_model_path = self.models_dir / "model.pkl"
+        meta_path = BASE_DIR / "data" / "hf_datasets" / "pool_metadata.json"
+
+        pool_metadata: Dict[str, Any] = {}
+        if meta_path.exists():
+            try:
+                pool_metadata = json.loads(meta_path.read_text(encoding="utf-8"))
+            except Exception:
+                pool_metadata = {}
+
+        pool_metadata["last_trained_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        pool_metadata["test_metrics"] = {
+            "roc_auc": round(metrics["roc_auc"], 4),
+            "precision_pct": round(metrics["precision"] * 100, 2),
+            "recall_pct": round(metrics["recall"] * 100, 2),
+            "f1_score": round(metrics["f1"], 4),
+            "accuracy_pct": round(metrics["accuracy"] * 100, 2),
+            "trades_triggered": metrics["trades_triggered"],
+        }
+        if meta_path.parent.exists():
+            meta_path.write_text(json.dumps(pool_metadata, indent=2, ensure_ascii=False), encoding="utf-8")
 
         payload = {
             "model": model,
             "logistic_regression": logreg_model,
+            "deep_mlp": deep_mlp,
             "features": features,
             "hmm_detector": hmm_detector,
             "ood_filter": ood_filter,
             "confidence_threshold": 0.75,
             "metrics": metrics,
-            "version": "2.1.0_TrainingPool_RR1_2",
+            "total_pool_rows": total_rows,
+            "datasets_used": [
+                "arvind7754/btc-candlestick-dataset",
+                "tripolskypetr/tradingview-ideas-signals",
+                "MT5_EXNESS_EURUSD",
+            ],
+            "pool_metadata": pool_metadata,
+            "version": "2.2.0_HF_MultiDataset_TrainingPool_RR1_2",
         }
         joblib.dump(payload, lgbm_path)
         joblib.dump(payload, std_model_path)
@@ -199,7 +269,7 @@ def main():
         from create_training_pool import fetch_and_label_data
         fetch_and_label_data()
 
-    dataset_file = csv_pool if csv_pool.exists() else parquet_pool
+    dataset_file = parquet_pool if parquet_pool.exists() else csv_pool
     if not dataset_file.exists():
         logging.error(f"Không tìm thấy file {dataset_file}.")
         return
@@ -208,9 +278,10 @@ def main():
     df = trainer.load_data()
     X_train, y_train, X_val, y_val, X_test, y_test, features = trainer.prepare_data(df)
 
-    # 1. Huấn luyện Classifier chính & Logistic Regression
+    # 1. Huấn luyện Classifier chính LightGBM, Logistic Regression & Deep MLP
     model = trainer.train_classifier(X_train, y_train, X_val, y_val)
     logreg_model = trainer.train_logistic_baseline(X_train, y_train)
+    deep_mlp = trainer.train_deep_mlp(X_train, y_train)
 
     # 2. Huấn luyện HMM Regime Detector
     hmm_detector = trainer.train_hmm(df)
@@ -222,7 +293,16 @@ def main():
     metrics = trainer.evaluate(model, X_test, y_test, threshold=0.75)
 
     # 5. Lưu toàn bộ pipeline ra model.pkl & lgbm_forex_model.pkl
-    trainer.save_full_pipeline(model, logreg_model, features, hmm_detector, ood_filter, metrics)
+    trainer.save_full_pipeline(
+        model=model,
+        logreg_model=logreg_model,
+        deep_mlp=deep_mlp,
+        features=features,
+        hmm_detector=hmm_detector,
+        ood_filter=ood_filter,
+        metrics=metrics,
+        total_rows=len(df),
+    )
 
 
 if __name__ == "__main__":

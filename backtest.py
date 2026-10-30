@@ -39,10 +39,15 @@ class Backtester:
         model = payload["model"]
         features = payload["features"]
 
-        logging.info("Đang nạp dữ liệu kiểm thử...")
-        df = pd.read_parquet(self.dataset_path).sort_values("time").reset_index(drop=True)
+        logging.info(f"Đang nạp dữ liệu kiểm thử từ {self.dataset_path}...")
+        if str(self.dataset_path).endswith(".csv"):
+            df = pd.read_csv(self.dataset_path)
+            df["time"] = pd.to_datetime(df["time"], utc=True)
+        else:
+            df = pd.read_parquet(self.dataset_path)
+        df = df.sort_values("time").reset_index(drop=True)
 
-        # Lấy đúng 15% tập Test (Out-of-sample) ở cuối như TASK-3.1
+        # Lấy đúng 15% tập Test (Out-of-sample) ở cuối như Bước 4 & 5
         val_end = int(len(df) * 0.85)
         test_df = df.iloc[val_end:].copy().reset_index(drop=True)
 
@@ -238,25 +243,27 @@ class Backtester:
         chart_path = BASE_DIR / "equity_curve.png"
         plt.savefig(chart_path, dpi=300)
         logging.info(f"Đã lưu biểu đồ Equity Curve tại: {chart_path}")
-        plt.show()
+        plt.close(fig)
 
 
 if __name__ == "__main__":
-    dataset_file = BASE_DIR / "data" / "processed_dataset.parquet"
+    csv_pool = BASE_DIR / "data" / "training_pool.csv"
+    parquet_pool = BASE_DIR / "data" / "processed_dataset.parquet"
+    dataset_file = csv_pool if csv_pool.exists() else parquet_pool
     model_file = BASE_DIR / "models" / "lgbm_forex_model.pkl"
 
     if not dataset_file.exists() or not model_file.exists():
-        logging.error("Thiếu file dữ liệu processed_dataset.parquet hoặc file models/lgbm_forex_model.pkl!")
+        logging.error("Thiếu file dữ liệu training_pool.csv / processed_dataset.parquet hoặc file models/lgbm_forex_model.pkl!")
     else:
         tester = Backtester(
             dataset_path=dataset_file,
             model_path=model_file,
             initial_balance=100000.0,
-            risk_per_trade=0.02,       # Rủi ro 2% mỗi lệnh
-            threshold=0.55,            # Chỉ vào lệnh khi AI tự tin >= 55%
-            tp_multiplier=1.5,
-            sl_multiplier=1.0,
-            horizon_bars=12,
+            risk_per_trade=0.01,       # Rủi ro 1R = 1% mỗi lệnh theo chuẩn
+            threshold=0.75,            # Chỉ vào lệnh khi AI tự tin >= 75% (Confidence >= 0.75)
+            tp_multiplier=2.0,         # TP = 2R
+            sl_multiplier=1.0,         # SL = 1R (Tỷ lệ R:R = 1:2)
+            horizon_bars=100,
             default_spread_pips=1.5
         )
         tester.run()

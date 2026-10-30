@@ -264,6 +264,8 @@ def start_bot_api(req: StartBotRequest):
     wallet_equity_usd = wallet_balance_usd + float(floating_profit)
 
     engine = AITradingEngine()
+    engine.load_models()
+    engine.load_initial_candles()
     engine.target_reached_triggered = False
     engine.session_start_wallet_equity = wallet_equity_usd
     engine.risk_manager.circuit_breaker_locked_until = None
@@ -352,6 +354,8 @@ def update_account_balance(req: BalanceUpdateRequest):
 
     # Đồng bộ vào Engine & Reset mốc số dư đầu ngày trong RiskManager
     engine = AITradingEngine()
+    engine.load_models()
+    engine.load_initial_candles()
     engine.target_reached_triggered = False
     engine.risk_manager.circuit_breaker_locked_until = None
     engine.risk_manager.lock_reason = ""

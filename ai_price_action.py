@@ -457,9 +457,9 @@ class PriceActionAnalyzer:
             is_bullish_trend = (last_ema20 > last_ema50) and (last_c >= last_ema20 * 0.9985)
             is_bearish_trend = (last_ema20 < last_ema50) and (last_c <= last_ema20 * 1.0015)
 
-            # Kiểm tra giá hồi về căn cứ (EMA20 hoặc Swing gần nhất)
-            pullback_bull = is_bullish_trend and (abs(last_c - last_ema20) < 0.0015)
-            pullback_bear = is_bearish_trend and (abs(last_c - last_ema20) < 0.0015)
+            # Kiểm tra giá hồi về căn cứ EMA20 hoặc tiếp diễn xu hướng mượt
+            pullback_bull = is_bullish_trend and (abs(last_c - last_ema20) < 0.0035)
+            pullback_bear = is_bearish_trend and (abs(last_c - last_ema20) < 0.0035)
 
             if pullback_bull:
                 entry = last_c

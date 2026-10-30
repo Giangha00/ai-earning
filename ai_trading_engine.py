@@ -201,7 +201,9 @@ class AITradingEngine:
 
                 self.df_candles = df
                 last_close = float(df["close"].iloc[-1])
-                if hasattr(mt5, "MockMT5"):
+                if hasattr(mt5, "set_symbol_price"):
+                    mt5.set_symbol_price(self.symbol, last_close)
+                elif hasattr(mt5, "MockMT5"):
                     mt5.MockMT5.set_symbol_price(self.symbol, last_close)
 
                 # Khởi tạo ngay last_candle và last_price vào latest_state
@@ -250,58 +252,20 @@ class AITradingEngine:
             self.active_websockets.discard(ws)
 
     def _build_features_row(self, df: pd.DataFrame) -> Optional[np.ndarray]:
-        """Tính toán features cho hàng nến cuối cùng để đưa vào Model & OOD Filter."""
+        """Tính toán đầy đủ ma trận features chuẩn Training Pool cho hàng nến cuối cùng để đưa vào Model & OOD Filter."""
         if len(df) < 55 or not self.features_list:
             return None
 
         try:
-            df_feat = df.copy()
-            df_feat["rsi_14"] = ta.rsi(df_feat["close"], length=14)
-            df_feat["rsi_7"] = ta.rsi(df_feat["close"], length=7)
-            df_feat["ema_20"] = ta.ema(df_feat["close"], length=20)
-            df_feat["ema_50"] = ta.ema(df_feat["close"], length=50)
-            df_feat["ema_200"] = ta.ema(df_feat["close"], length=200)
-
-            df_feat["dist_ema_20"] = (df_feat["close"] - df_feat["ema_20"]) / df_feat["ema_20"] * 100
-            df_feat["dist_ema_50"] = (df_feat["close"] - df_feat["ema_50"]) / df_feat["ema_50"] * 100
-
-            macd = ta.macd(df_feat["close"], fast=12, slow=26, signal=9)
-            if macd is not None and not macd.empty:
-                macd_col = next((c for c in macd.columns if c.startswith("MACD_")), None)
-                macds_col = next((c for c in macd.columns if c.startswith("MACDs_")), None)
-                macdh_col = next((c for c in macd.columns if c.startswith("MACDh_")), None)
-                if macd_col and macds_col and macdh_col:
-                    df_feat["macd"] = macd[macd_col]
-                    df_feat["macd_signal"] = macd[macds_col]
-                    df_feat["macd_hist"] = macd[macdh_col]
-
-            df_feat["atr_14"] = ta.atr(df_feat["high"], df_feat["low"], df_feat["close"], length=14)
-            df_feat["atr_pct"] = df_feat["atr_14"] / df_feat["close"] * 100
-
-            bb = ta.bbands(df_feat["close"], length=20, std=2)
-            if bb is not None and not bb.empty:
-                bbu_col = next((c for c in bb.columns if c.startswith("BBU")), None)
-                bbl_col = next((c for c in bb.columns if c.startswith("BBL")), None)
-                if bbu_col and bbl_col:
-                    df_feat["bb_width"] = (bb[bbu_col] - bb[bbl_col]) / df_feat["close"] * 100
-                    df_feat["bb_pct"] = (df_feat["close"] - bb[bbl_col]) / (bb[bbu_col] - bb[bbl_col] + 1e-9)
-
-            body = (df_feat["close"] - df_feat["open"]).abs()
-            candle_range = df_feat["high"] - df_feat["low"] + 1e-9
-            df_feat["body_ratio"] = body / candle_range
-            df_feat["return_1"] = df_feat["close"].pct_change(1) * 100
-            df_feat["return_3"] = df_feat["close"].pct_change(3) * 100
-            df_feat["return_5"] = df_feat["close"].pct_change(5) * 100
-
-            df_feat["vol_sma_20"] = ta.sma(df_feat["tick_volume"], length=20)
-            df_feat["vol_ratio"] = df_feat["tick_volume"] / (df_feat["vol_sma_20"] + 1e-9)
-
-            time_series = pd.to_datetime(df_feat["time"], utc=True)
-            df_feat["hour"] = time_series.dt.hour
-            df_feat["dayofweek"] = time_series.dt.dayofweek
+            from create_training_pool import compute_training_pool_features
+            pip = 0.0001 if "JPY" not in self.symbol else 0.01
+            # Nếu nến cuối cùng mới mở (chưa đóng nến, tick_volume còn nhỏ), dùng nến đã đóng gần nhất để tránh nhiễu intra-bar
+            last_vol = float(df["tick_volume"].iloc[-1]) if "tick_volume" in df.columns else 0.0
+            eval_df = df.iloc[:-1] if (len(df) > 60 and last_vol < 100) else df
+            df_feat = compute_training_pool_features(eval_df, pip=pip)
 
             # Lấy đúng các features đã dùng khi train
-            last_features = df_feat[self.features_list].iloc[-1].values
+            last_features = df_feat[self.features_list].iloc[-1].fillna(0.0).values
             return last_features.astype(float)
         except Exception as e:
             logging.debug(f"Lỗi tính features realtime: {e}")
@@ -407,7 +371,7 @@ class AITradingEngine:
             if ticket:
                 # Ghi vào orders
                 cursor.execute("""
-                    INSERT INTO orders 
+                    INSERT OR REPLACE INTO orders 
                     (ticket_id, symbol, order_type, lot_size, open_time, open_price, stop_loss, take_profit, profit, status, market_case, rr_ratio)
                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0.0, 'OPEN', ?, ?);
                 """, (ticket, symbol, action.value, lot_size, now_str, entry_price, sl_price, tp_price, market_case.value, calc_rr))
@@ -606,10 +570,10 @@ class AITradingEngine:
             anomaly_score = ood_details.get("anomaly_score", 0.0)
             is_ood = ood_details.get("is_ood", False)
 
-        # Kết hợp độ tin cậy từ Model (đã hiệu chuẩn phân phối) + Price Action Modifier + HMM Regime Alignment
-        calibrated_prob = min(0.68, max(0.35, 0.52 + (raw_prob - 0.394) * 3.5))
-        hmm_bonus = 0.06 if (hmm_is_safe and pa_result.is_tradable) else 0.0
-        final_confidence = min(0.98, max(0.0, calibrated_prob + pa_result.confidence_modifier + hmm_bonus))
+        # Kết hợp xác suất dự đoán từ mô hình Training Pool (raw_prob) + Price Action Modifier
+        final_confidence = min(0.98, max(0.0, raw_prob * 0.75 + pa_result.confidence_modifier))
+        if raw_prob >= 0.75 and pa_result.is_tradable:
+            final_confidence = min(0.98, max(raw_prob, final_confidence))
 
         # 5. Đánh giá Cầu dao và Điều kiện An toàn
         is_safe_trade, safe_reason = self.risk_manager.is_safe_to_trade()

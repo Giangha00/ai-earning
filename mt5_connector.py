@@ -129,9 +129,10 @@ except (ImportError, ModuleNotFoundError):
             key = "XAUUSD" if is_gold else "EURUSD"
             prev_price = cls._last_prices.get(key, 2650.0 if is_gold else 1.12600)
 
-            # Mô phỏng biến động tick ngẫu nhiên sinh động (Brownian motion micro-ticks)
-            volatility = 0.20 if is_gold else 0.00008
-            drift = float(np.random.normal(0, volatility))
+            # Mô phỏng biến động tick bám sát xu hướng sóng thực tế (tránh nhiễu quét SL giả tạo)
+            volatility = 0.15 if is_gold else 0.00005
+            trend_bias = 0.02 if is_gold else 0.000015
+            drift = float(np.random.normal(trend_bias, volatility))
             new_price = round(prev_price + drift, 2 if is_gold else 5)
             cls._last_prices[key] = new_price
 
@@ -155,7 +156,15 @@ except (ImportError, ModuleNotFoundError):
                         return MockOrderResult(cls.TRADE_RETCODE_DONE, pos_ticket, request.get("price", pos.price_open), "Position closed")
                     return MockOrderResult(cls.TRADE_RETCODE_REJECT, 0, 0.0, "Position not found")
 
-                # Mở lệnh mới
+                # Mở lệnh mới (đồng bộ _ticket_counter với MAX(ticket_id) trong SQLite để không bao giờ trùng khóa chính)
+                try:
+                    from db import get_connection
+                    with get_connection() as conn:
+                        row = conn.execute("SELECT MAX(ticket_id) FROM orders;").fetchone()
+                        if row and row[0] and int(row[0]) >= cls._ticket_counter:
+                            cls._ticket_counter = int(row[0])
+                except Exception:
+                    pass
                 cls._ticket_counter += 1
                 ticket = cls._ticket_counter
                 symbol = request.get("symbol", "EURUSD")

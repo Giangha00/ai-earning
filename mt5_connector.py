@@ -24,10 +24,20 @@ except (ImportError, ModuleNotFoundError):
             if balance is not None:
                 self.balance = float(balance)
             else:
-                self.balance = float(getattr(config, "MT5_BALANCE", 10000.0))
+                saved_bal = get_setting("account_balance", "")
+                if saved_bal:
+                    try:
+                        self.balance = float(saved_bal)
+                        config.MT5_BALANCE = self.balance
+                    except ValueError:
+                        self.balance = float(getattr(config, "MT5_BALANCE", 10000.0))
+                else:
+                    self.balance = float(getattr(config, "MT5_BALANCE", 10000.0))
             self.equity = self.balance
             self.currency = "USD"
             self.leverage = 100
+            self.margin = 0.0
+            self.margin_free = self.balance
             self.margin_level = 500.0
 
     class MockSymbolInfo:
@@ -42,6 +52,10 @@ except (ImportError, ModuleNotFoundError):
             self.spread = info.get("spread", 15)
             self.trade_tick_size = self.point
             self.trade_tick_value = 1.0
+            self.trade_contract_size = (
+                1.0 if "BTC" in symbol or "ETH" in symbol or self.category in ("Crypto", "Chỉ số", "Cổ phiếu")
+                else (100.0 if "XAU" in symbol or "GOLD" in symbol else 100000.0)
+            )
             self.volume_min = 0.01
             self.volume_max = 100.0
             self.volume_step = 0.01
@@ -51,11 +65,14 @@ except (ImportError, ModuleNotFoundError):
 
     class MockTick:
         def __init__(self, symbol: str = "EURUSD"):
-            is_gold = "XAU" in symbol or "GOLD" in symbol
-            base = 2650.0 if is_gold else 1.1260
-            spread = 0.30 if is_gold else 0.00015
+            info = exness_markets.get_market_by_symbol(symbol)
+            digits = int(info.get("digits", 5))
+            point = float(info.get("point", 0.00001))
+            spread_pts = float(info.get("spread", 15))
+            base = float(info.get("base", 1.1260))
+            spread = spread_pts * point
             self.bid = base
-            self.ask = round(base + spread, 2 if is_gold else 5)
+            self.ask = round(base + spread, digits)
             self.last = self.ask
             self.volume = 100
             self.time = int(time.time())
@@ -70,7 +87,27 @@ except (ImportError, ModuleNotFoundError):
             self.price_current = price_open
             self.sl = sl
             self.tp = tp
+            self.swap = 0.0
+            self.commission = -round(float(volume) * float(getattr(config, "COMMISSION_PER_LOT_USD", 7.0)), 2)
+            self.profit = 0.0
+            self.time = int(time.time())
             self.magic = magic
+            self.comment = comment
+
+    class MockDeal:
+        def __init__(self, ticket: int, position_id: int, symbol: str, entry: int, deal_type: int, volume: float, price: float, profit: float, commission: float, swap: float, fee: float = 0.0, comment: str = ""):
+            self.ticket = ticket
+            self.position_id = position_id
+            self.symbol = symbol
+            self.entry = entry  # 0: IN, 1: OUT
+            self.type = deal_type
+            self.volume = volume
+            self.price = price
+            self.profit = profit
+            self.commission = commission
+            self.swap = swap
+            self.fee = fee
+            self.time = int(time.time())
             self.comment = comment
 
     class MockOrderResult:
@@ -104,6 +141,7 @@ except (ImportError, ModuleNotFoundError):
 
         # Actions & Types
         TRADE_ACTION_DEAL = 1
+        TRADE_ACTION_SLTP = 6
         ORDER_TYPE_BUY = 0
         ORDER_TYPE_SELL = 1
         POSITION_TYPE_BUY = 0
@@ -113,33 +151,53 @@ except (ImportError, ModuleNotFoundError):
         ORDER_FILLING_FOK = 0
 
         _positions = {}
+        _history_deals = {}
         _ticket_counter = 1000000
         _last_prices = {"EURUSD": 1.12600, "XAUUSD": 2650.50}
+        _last_tick_ts = {}
 
         @classmethod
         def set_symbol_price(cls, symbol: str, price: float):
-            """Đồng bộ mức giá khởi tạo từ dữ liệu nến thực tế để tránh nhảy gáp."""
-            is_gold = "XAU" in symbol or "GOLD" in symbol
-            key = "XAUUSD" if is_gold else "EURUSD"
-            cls._last_prices[key] = round(float(price), 2 if is_gold else 5)
+            """Đồng bộ mức giá khởi tạo từ dữ liệu nến thực tế cho bất kỳ mã nào trong 355 thị trường."""
+            sym = (symbol or "EURUSD").upper()
+            info = exness_markets.get_market_by_symbol(sym)
+            digits = int(info.get("digits", 5))
+            cls._last_prices[sym] = round(float(price), digits)
+            cls._last_tick_ts[sym] = time.monotonic()
 
         @classmethod
         def symbol_info_tick(cls, symbol: str):
-            is_gold = "XAU" in symbol or "GOLD" in symbol
-            key = "XAUUSD" if is_gold else "EURUSD"
-            prev_price = cls._last_prices.get(key, 2650.0 if is_gold else 1.12600)
+            sym = (symbol or "EURUSD").upper()
+            info = exness_markets.get_market_by_symbol(sym)
+            digits = int(info.get("digits", 5))
+            point = float(info.get("point", 0.00001))
+            spread_pts = float(info.get("spread", 15))
+            base_default = float(info.get("base", 1.12600))
+            prev_price = cls._last_prices.get(sym, base_default)
 
-            # Mô phỏng biến động tick bám sát xu hướng sóng thực tế (tránh nhiễu quét SL giả tạo)
-            volatility = 0.15 if is_gold else 0.00005
-            trend_bias = 0.02 if is_gold else 0.000015
-            drift = float(np.random.normal(trend_bias, volatility))
-            new_price = round(prev_price + drift, 2 if is_gold else 5)
-            cls._last_prices[key] = new_price
+            # Giữ nguyên mức giá tick trong cùng một chu kỳ khớp lệnh (< 1.0s) để giá kiểm tra và giá đặt/đóng lệnh khớp 100%
+            now_mono = time.monotonic()
+            last_mono = cls._last_tick_ts.get(sym, 0.0)
+            if (now_mono - last_mono) >= 1.0:
+                cat = info.get("category", "Forex")
+                if cat == "Crypto":
+                    volatility = max(point * 5, prev_price * 0.00025)
+                elif cat in ("Kim loại & Dầu", "Chỉ số", "Cổ phiếu"):
+                    volatility = max(point * 3, prev_price * 0.00015)
+                else:
+                    volatility = max(point * 5, 0.00005 if digits == 5 else 0.005)
+                trend_bias = volatility * 0.25
+                drift = float(np.random.normal(trend_bias, volatility))
+                new_price = round(prev_price + drift, digits)
+                cls._last_prices[sym] = new_price
+                cls._last_tick_ts[sym] = now_mono
+            else:
+                new_price = prev_price
 
-            spread = 0.30 if is_gold else 0.00015
-            tick = MockTick(symbol)
+            spread = spread_pts * point
+            tick = MockTick(sym)
             tick.bid = new_price
-            tick.ask = round(new_price + spread, 2 if is_gold else 5)
+            tick.ask = round(new_price + spread, digits)
             tick.last = tick.ask
             tick.time = int(time.time())
             return tick
@@ -153,7 +211,31 @@ except (ImportError, ModuleNotFoundError):
                 if pos_ticket is not None:
                     if pos_ticket in cls._positions:
                         pos = cls._positions.pop(pos_ticket)
-                        return MockOrderResult(cls.TRADE_RETCODE_DONE, pos_ticket, request.get("price", pos.price_open), "Position closed")
+                        close_p = float(request.get("price", pos.price_open))
+                        mult = get_contract_multiplier(pos.symbol)
+                        gross = (
+                            (close_p - pos.price_open) * mult * pos.volume
+                            if pos.type == cls.POSITION_TYPE_BUY
+                            else (pos.price_open - close_p) * mult * pos.volume
+                        )
+                        comm = -round(float(pos.volume) * float(getattr(config, "COMMISSION_PER_LOT_USD", 7.0)), 2)
+                        swap_val = float(getattr(pos, "swap", 0.0))
+                        cls._history_deals[pos_ticket] = [
+                            MockDeal(
+                                ticket=pos_ticket * 10 + 1,
+                                position_id=pos_ticket,
+                                symbol=pos.symbol,
+                                entry=1,
+                                deal_type=request.get("type", cls.ORDER_TYPE_SELL),
+                                volume=pos.volume,
+                                price=close_p,
+                                profit=round(gross, 2),
+                                commission=comm,
+                                swap=swap_val,
+                                comment=request.get("comment", "Position closed"),
+                            )
+                        ]
+                        return MockOrderResult(cls.TRADE_RETCODE_DONE, pos_ticket, close_p, "Position closed")
                     return MockOrderResult(cls.TRADE_RETCODE_REJECT, 0, 0.0, "Position not found")
 
                 # Mở lệnh mới (đồng bộ _ticket_counter với MAX(ticket_id) trong SQLite để không bao giờ trùng khóa chính)
@@ -179,6 +261,17 @@ except (ImportError, ModuleNotFoundError):
                 pos = MockPosition(ticket, symbol, p_type, volume, price, sl, tp, magic, comment)
                 cls._positions[ticket] = pos
                 return MockOrderResult(cls.TRADE_RETCODE_DONE, ticket, price, "Request executed")
+
+            if action == cls.TRADE_ACTION_SLTP:
+                pos_ticket = int(request.get("position", 0))
+                if pos_ticket in cls._positions:
+                    pos = cls._positions[pos_ticket]
+                    if "sl" in request and request["sl"] is not None:
+                        pos.sl = float(request["sl"])
+                    if "tp" in request and request["tp"] is not None:
+                        pos.tp = float(request["tp"])
+                    return MockOrderResult(cls.TRADE_RETCODE_DONE, pos_ticket, pos.price_current, "SL/TP modified")
+                return MockOrderResult(cls.TRADE_RETCODE_REJECT, 0, 0.0, "Position not found")
 
             return MockOrderResult(cls.TRADE_RETCODE_REJECT, 0, 0.0, "Action not supported")
 
@@ -209,21 +302,48 @@ except (ImportError, ModuleNotFoundError):
             return True
 
         @classmethod
+        def history_deals_get(cls, date_from=None, date_to=None, group=None, ticket=None, position=None):
+            if position is not None:
+                return tuple(cls._history_deals.get(int(position), []))
+            all_deals = []
+            for deals in cls._history_deals.values():
+                all_deals.extend(deals)
+            return tuple(all_deals)
+
+        @classmethod
+        def order_calc_margin(cls, action: int, symbol: str, volume: float, price: float) -> float:
+            """Tính tiền ký quỹ (Margin USD) cần thiết để mở lệnh theo đòn bẩy tài khoản."""
+            mult = get_contract_multiplier(symbol)
+            leverage = 100.0
+            notional_usd = float(volume) * mult * float(price if price > 0 else 1.0)
+            if symbol.startswith("USD") and symbol not in ("USDX",):
+                notional_usd = float(volume) * mult
+            return round(notional_usd / leverage, 2)
+
+        @classmethod
         def account_info(cls):
             acc = MockAccountInfo(config.MT5_LOGIN, config.MT5_SERVER, cls._account_balance)
-            # Tính Equity thực tế tự động trừ sạch phí Commission (7 USD/lot) và Spread thả nổi theo thời gian thực (Mục 6 PDF)
+            # Tính Equity, Margin, Free Margin thực tế tự động trừ sạch phí Commission (7 USD/lot), Swap và Spread thả nổi
             floating_net = 0.0
+            used_margin = 0.0
             comm_per_lot = float(getattr(config, "COMMISSION_PER_LOT_USD", 7.0))
             for pos in cls._positions.values():
-                is_gold = "XAU" in pos.symbol or "GOLD" in pos.symbol
-                key = "XAUUSD" if is_gold else "EURUSD"
-                bid_p = cls._last_prices.get(key, pos.price_open)
-                spread_val = 0.30 if is_gold else 0.00015
-                ask_p = round(bid_p + spread_val, 2 if is_gold else 5)
-                mult = 100.0 if is_gold else 100000.0
+                sym = (pos.symbol or "EURUSD").upper()
+                info = exness_markets.get_market_by_symbol(sym)
+                digits = int(info.get("digits", 5))
+                point = float(info.get("point", 0.00001))
+                spread_val = float(info.get("spread", 15)) * point
+                bid_p = cls._last_prices.get(sym, pos.price_open)
+                ask_p = round(bid_p + spread_val, digits)
+                mult = get_contract_multiplier(sym)
                 gross = (bid_p - pos.price_open) * mult * pos.volume if pos.type == cls.POSITION_TYPE_BUY else (pos.price_open - ask_p) * mult * pos.volume
-                floating_net += gross - (pos.volume * comm_per_lot)
+                swap_val = float(getattr(pos, "swap", 0.0))
+                floating_net += gross - (pos.volume * comm_per_lot) + swap_val
+                used_margin += cls.order_calc_margin(pos.type, sym, pos.volume, pos.price_open)
             acc.equity = round(acc.balance + floating_net, 2)
+            acc.margin = round(used_margin, 2)
+            acc.margin_free = round(max(0.0, acc.equity - acc.margin), 2)
+            acc.margin_level = round((acc.equity / acc.margin) * 100.0, 2) if acc.margin > 0 else 500.0
             return acc
 
         @staticmethod
@@ -334,9 +454,47 @@ except (ImportError, ModuleNotFoundError):
         def last_error():
             return (0, "Success (Simulation)")
 
-    mt5 = MockMT5()
+    _mock_mt5 = MockMT5()
+    try:
+        from mt5_wine_bridge import WineMT5Bridge
+        if WineMT5Bridge.is_available():
+            mt5 = WineMT5Bridge(fallback_mock=_mock_mt5)
+            IS_SIMULATION = False
+        else:
+            mt5 = _mock_mt5
+            IS_SIMULATION = True
+    except Exception as _bridge_err:
+        logging.warning(f"Không thể khởi tạo WineMT5Bridge, chuyển về MockMT5: {_bridge_err}")
+        mt5 = _mock_mt5
+        IS_SIMULATION = True
+
     import sys
     sys.modules.setdefault("MetaTrader5", mt5)
+
+
+def get_pip_size(symbol: str, info=None) -> float:
+    """
+    Trả về kích thước 1 Pip chuẩn theo từng nhóm tài sản trên MT5 / Exness:
+    - Vàng / Bạc (XAUUSD, XAGUSD): 1 pip = 0.10
+    - Crypto / Chỉ số (BTCUSD, ETHUSD, US30, NAS100, US500...): 1 pip = 1.0
+    - Cặp JPY (USDJPY, EURJPY, GBPJPY...): 1 pip = 0.01
+    - Cổ phiếu / Dầu (2 chữ số thập phân): 1 pip = 0.10
+    - Forex chuẩn 5 chữ số (EURUSD, GBPUSD...): 1 pip = 0.0001 (point * 10)
+    """
+    sym = (symbol or "EURUSD").upper()
+    if info is None and mt5:
+        info = mt5.symbol_info(sym)
+    if "XAU" in sym or "GOLD" in sym or "XAG" in sym:
+        return 0.1
+    if any(k in sym for k in ("BTC", "ETH", "SOL", "BNB", "BCH", "US30", "NAS100", "US500", "USTEC", "DE30", "JP225", "UK100")):
+        return 1.0
+    if "JPY" in sym:
+        return 0.01
+    if info and getattr(info, "digits", 5) == 2:
+        return 0.1
+    if info and getattr(info, "digits", 5) in (3, 5):
+        return float(info.point) * 10.0
+    return float(getattr(info, "point", 0.0001)) if info else 0.0001
 
 
 def get_current_spread_pips(symbol: str) -> float:
@@ -349,9 +507,151 @@ def get_current_spread_pips(symbol: str) -> float:
     info = mt5.symbol_info(symbol)
     if not tick or not info:
         return 999.0
-    raw_spread = tick.ask - tick.bid
-    divider = (info.point * 10) if info.digits in [3, 5] else info.point
-    return round(raw_spread / divider, 2)
+    raw_spread = float(tick.ask - tick.bid)
+    divider = get_pip_size(symbol, info)
+    return round(raw_spread / divider, 2) if divider > 0 else 999.0
+
+
+def get_contract_multiplier(symbol: str) -> float:
+    """
+    Trả về quy mô hợp đồng (Contract Size) chuẩn cho từng loại tài sản trên Ví thực MT5:
+    - Crypto (BTCUSD, ETHUSD) / Chỉ số (US30, NAS100, US500) / Cổ phiếu: 1 Lot = 1 đơn vị (1.0)
+    - Vàng (XAUUSD, GOLD): 1 Lot = 100 oz (100.0)
+    - Bạc (XAGUSD): 1 Lot = 5,000 oz (5000.0)
+    - Dầu (USOIL, UKOIL): 1 Lot = 1,000 thùng (1000.0)
+    - Forex chuẩn (EURUSD, GBPUSD, USDJPY...): 1 Lot = 100,000 đơn vị tiền tệ cơ sở (100000.0)
+    """
+    sym = (symbol or "EURUSD").upper()
+    info = mt5.symbol_info(sym) if mt5 else None
+    if info and hasattr(info, "trade_contract_size") and float(getattr(info, "trade_contract_size", 0)) > 0:
+        return float(info.trade_contract_size)
+    if any(k in sym for k in ("BTC", "ETH", "SOL", "BNB", "XRP", "DOGE", "ADA", "US30", "NAS100", "US500", "USTEC", "DE30", "JP225")):
+        return 1.0
+    if "XAU" in sym or "GOLD" in sym:
+        return 100.0
+    if "XAG" in sym:
+        return 5000.0
+    if "OIL" in sym:
+        return 1000.0
+    return 100000.0
+
+
+def get_pip_value_per_lot(symbol: str, current_price: float = 0.0) -> float:
+    """
+    Tính chính xác giá trị 1 Pip trên 1 Standard Lot (USD) cho mọi cặp tiền/tài sản:
+    - Cặp XXXUSD (EURUSD, GBPUSD, AUDUSD, XAUUSD...): $10.0 / pip / lot
+    - Cặp USDXXX (USDJPY, USDCAD, USDCHF...): $10.0 / tỷ giá (nếu JPY thì 1000.0 / tỷ giá)
+    - BTCUSD / Crypto (1 pip = $1.0, 1 lot = 1 coin): $1.0 / pip / lot
+    """
+    sym = (symbol or "EURUSD").upper()
+    if current_price <= 0 and mt5:
+        tick = mt5.symbol_info_tick(sym)
+        if tick:
+            current_price = float(tick.ask or tick.bid or 0.0)
+
+    if any(k in sym for k in ("BTC", "ETH", "SOL", "US30", "NAS100", "US500")):
+        return 1.0
+    if "XAU" in sym or "GOLD" in sym:
+        return 10.0
+    if sym.endswith("USD"):
+        return 10.0
+    if sym.startswith("USD") and current_price > 0:
+        if "JPY" in sym:
+            return round(1000.0 / current_price, 4)
+        return round(10.0 / current_price, 4)
+    return 10.0
+
+
+def calculate_rollover_swap(symbol: str, lot_size: float, open_time_str: str = None) -> float:
+    """
+    Tính phí qua đêm (Swap / Rollover USD) khi giữ lệnh qua mốc 00:00 Server.
+    Đêm Thứ Tư sang Thứ Năm (weekday == 2) tính Swap x3 theo chuẩn sàn Quốc tế.
+    """
+    if not open_time_str:
+        return 0.0
+    try:
+        from datetime import datetime, timedelta
+        open_dt = datetime.strptime(str(open_time_str)[:19], "%Y-%m-%d %H:%M:%S")
+        now_dt = datetime.now()
+        if now_dt.date() <= open_dt.date():
+            return 0.0
+
+        sym = (symbol or "EURUSD").upper()
+        swap_rates = getattr(config, "SWAP_PER_LOT_DAILY_USD", {})
+        daily_rate = float(swap_rates.get(sym, swap_rates.get("DEFAULT", -3.0)))
+
+        total_nights = 0
+        cur_date = open_dt.date()
+        while cur_date < now_dt.date():
+            # Đêm Thứ Tư (weekday == 2) bị tính phí Swap x3
+            total_nights += 3 if cur_date.weekday() == 2 else 1
+            cur_date += timedelta(days=1)
+
+        return round(float(lot_size) * daily_rate * total_nights, 2)
+    except Exception:
+        return 0.0
+
+
+def get_position_swap_and_commission(
+    ticket: int,
+    symbol: str,
+    lot_size: float,
+    open_time_str: str = None,
+) -> tuple[float, float]:
+    """
+    Trả về (swap_usd, commission_usd) của một lệnh mở hoặc vừa đóng trên Ví thực:
+    - Ưu tiên đọc trực tiếp `pos.swap` và `pos.commission` từ Terminal MT5 thật.
+    - Nếu sàn tính commission ở deal hoặc chạy giả lập, áp dụng COMMISSION_PER_LOT_USD (7.0 USD/lot) và rollover swap.
+    """
+    comm_per_lot = float(getattr(config, "COMMISSION_PER_LOT_USD", 7.0))
+    default_comm = round(float(lot_size) * comm_per_lot, 2)
+    swap_usd = calculate_rollover_swap(symbol, lot_size, open_time_str)
+
+    if mt5 and ticket:
+        positions = mt5.positions_get(ticket=int(ticket))
+        if positions:
+            pos = positions[0]
+            mt5_swap = float(getattr(pos, "swap", 0.0))
+            if mt5_swap != 0.0:
+                swap_usd = round(mt5_swap, 2)
+            mt5_comm = abs(float(getattr(pos, "commission", 0.0)))
+            if mt5_comm > 0.0:
+                default_comm = round(mt5_comm, 2)
+    return swap_usd, default_comm
+
+
+def sync_closed_deal_from_mt5(ticket: int) -> dict | None:
+    """
+    Kiểm tra lịch sử khớp lệnh thực tế `mt5.history_deals_get(position=ticket)` từ Terminal MT5
+    để đồng bộ những vị thế đã tự đóng trên Server Exness (do chạm SL/TP trên sàn hoặc đóng trên điện thoại).
+    """
+    if not mt5 or not ticket or not hasattr(mt5, "history_deals_get"):
+        return None
+    try:
+        deals = mt5.history_deals_get(position=int(ticket))
+        if not deals:
+            return None
+        # Tìm deal đóng vị thế (entry == 1: DEAL_ENTRY_OUT)
+        out_deals = [d for d in deals if getattr(d, "entry", 1) == 1]
+        target_deal = out_deals[-1] if out_deals else deals[-1]
+        gross_profit = float(getattr(target_deal, "profit", 0.0))
+        total_comm = sum(abs(float(getattr(d, "commission", 0.0))) for d in deals)
+        total_swap = sum(float(getattr(d, "swap", 0.0)) for d in deals)
+        total_fee = sum(float(getattr(d, "fee", 0.0)) for d in deals)
+        vol = float(getattr(target_deal, "volume", 0.01))
+        if total_comm == 0.0:
+            total_comm = round(vol * float(getattr(config, "COMMISSION_PER_LOT_USD", 7.0)), 2)
+        net_profit = round(gross_profit - total_comm + total_swap + total_fee, 2)
+        return {
+            "close_price": float(getattr(target_deal, "price", 0.0)),
+            "gross_profit": round(gross_profit, 2),
+            "commission": round(total_comm, 2),
+            "swap": round(total_swap, 2),
+            "net_profit": net_profit,
+            "comment": str(getattr(target_deal, "comment", "MT5_DEAL_SYNC")),
+        }
+    except Exception:
+        return None
 
 
 class MT5Connector:

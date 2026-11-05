@@ -22,3 +22,7 @@ wsproto>=1.2.0
 
 # Visualization & Backtesting
 matplotlib>=3.8.0
+
+# Data Crawling & Scraping
+beautifulsoup4>=4.12.0
+requests>=2.31.0

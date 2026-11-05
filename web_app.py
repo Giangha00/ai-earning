@@ -119,10 +119,19 @@ async def websocket_live_endpoint(websocket: WebSocket):
     await engine.register_websocket(websocket)
     try:
         while True:
-            # Lắng nghe tin nhắn từ client (ping/pong)
+            # Lắng nghe tin nhắn từ client (ping/pong hoặc SWITCH_SYMBOL)
             msg = await websocket.receive_text()
             if msg == "ping":
                 await websocket.send_text("pong")
+            elif msg.startswith("{"):
+                try:
+                    data = json.loads(msg)
+                    if data.get("type") == "SWITCH_SYMBOL":
+                        sym = str(data.get("symbol", "EURUSD")).strip()
+                        tf = str(data.get("timeframe", "M5")).strip().upper()
+                        engine.switch_symbol(sym, tf)
+                except Exception:
+                    pass
     except WebSocketDisconnect:
         engine.unregister_websocket(websocket)
     except Exception:
@@ -230,6 +239,8 @@ class StartBotRequest(BaseModel):
     initial_capital: float = 100.0
     custom_lot: float = 0.01
     target_goal: float = 200.0
+    symbol: Optional[str] = None
+    timeframe: Optional[str] = None
 
 
 @app.post("/api/start_bot")
@@ -269,6 +280,7 @@ def start_bot_api(req: StartBotRequest):
     set_setting("initial_capital_usd", str(config.INITIAL_CAPITAL))
     set_setting("custom_lot_size", str(config.CUSTOM_LOT_SIZE))
     set_setting("target_profit_goal_usd", str(config.TARGET_PROFIT_GOAL))
+    set_setting("bot_running", "true")
 
     with get_connection() as conn:
         cursor = conn.cursor()
@@ -278,7 +290,9 @@ def start_bot_api(req: StartBotRequest):
 
     engine = AITradingEngine()
     engine.load_models()
-    engine.load_initial_candles()
+    target_sym = (getattr(req, "symbol", None) or engine.symbol or "EURUSD").strip().upper()
+    target_tf = (getattr(req, "timeframe", None) or getattr(engine, "timeframe_str", "M5")).strip().upper()
+    engine.switch_symbol(target_sym, target_tf)
     engine.target_reached_triggered = False
     engine.session_start_wallet_equity = wallet_equity_usd
     engine.risk_manager.circuit_breaker_locked_until = None
@@ -329,6 +343,7 @@ def stop_bot_api():
     closed_cnt = close_all_positions()
     config.BOT_RUNNING = False
     config_module.BOT_RUNNING = False
+    set_setting("bot_running", "false")
     engine = AITradingEngine()
     engine.stop()
     engine.latest_state["bot_running"] = False
@@ -368,7 +383,9 @@ def update_account_balance(req: BalanceUpdateRequest):
     # Đồng bộ vào Engine & Reset mốc số dư đầu ngày trong RiskManager
     engine = AITradingEngine()
     engine.load_models()
-    engine.load_initial_candles()
+    target_sym = (getattr(req, "symbol", None) or engine.symbol or "EURUSD").strip().upper()
+    target_tf = (getattr(req, "timeframe", None) or getattr(engine, "timeframe_str", "M5")).strip().upper()
+    engine.switch_symbol(target_sym, target_tf)
     engine.target_reached_triggered = False
     engine.risk_manager.circuit_breaker_locked_until = None
     engine.risk_manager.lock_reason = ""
@@ -446,37 +463,24 @@ def get_all_markets_api(category: Optional[str] = None, search: Optional[str] = 
 def get_candles(symbol: str = "EURUSD", timeframe: str = "M5", limit: int = 1500):
     """
     Đọc dữ liệu nến từ Parquet file / Engine và trả về dữ liệu chuẩn cho TradingView Lightweight Charts.
+    Đồng thời đồng bộ `engine.switch_symbol(symbol, timeframe)` để luồng WebSocket real-time
+    chạy trực tiếp trên bất kỳ sàn (symbol) nào người dùng đang mở.
     """
     engine = AITradingEngine()
-    if not engine.df_candles.empty and symbol == engine.symbol:
-        df = engine.df_candles.copy()
-    else:
-        data_dir = BASE_DIR / "data"
-        pattern = str(data_dir / f"{symbol}_{timeframe}_*.parquet")
-        files = glob.glob(pattern)
+    tf_norm = (timeframe or "M5").strip().upper()
 
-        if not files:
-            # Nếu là symbol khác chưa có parquet (XAUUSD, BTCUSD, US30...), sinh nến chuẩn từ MT5
-            if hasattr(mt5, "copy_rates_from_pos"):
-                tf_val = 5 if timeframe == "M5" else (1 if timeframe == "M1" else 15)
-                rates = mt5.copy_rates_from_pos(symbol, tf_val, 0, min(limit, 500))
-                df = pd.DataFrame(rates)
-                df["time"] = pd.to_datetime(df["time"], unit="s", utc=True)
-            else:
-                all_files = glob.glob(str(data_dir / "*.parquet"))
-                if not all_files:
-                    return JSONResponse({"candles": [], "volume": [], "sma20": [], "sma50": [], "rsi": []})
-                latest_file = max(all_files, key=os.path.getmtime)
-                df = pd.read_parquet(latest_file)
-        else:
-            latest_file = max(files, key=os.path.getmtime)
-            df = pd.read_parquet(latest_file)
+    if symbol != engine.symbol or tf_norm != getattr(engine, "timeframe_str", "M5") or engine.df_candles.empty:
+        engine.switch_symbol(symbol=symbol, timeframe=tf_norm)
 
+    df = engine.df_candles.copy()
     df = df.sort_values(by="time").reset_index(drop=True)
     df = calculate_indicators(df)
 
     if limit > 0 and len(df) > limit:
         df = df.tail(limit).reset_index(drop=True)
+
+    sym_info = mt5.symbol_info(symbol) if hasattr(mt5, "symbol_info") else None
+    digits = int(getattr(sym_info, "digits", 5)) if sym_info else 5
 
     candles = []
     volumes = []
@@ -491,10 +495,10 @@ def get_candles(symbol: str = "EURUSD", timeframe: str = "M5", limit: int = 1500
 
         candles.append({
             "time": ts,
-            "open": round(o, 5),
-            "high": round(h, 5),
-            "low": round(l, 5),
-            "close": round(c, 5)
+            "open": round(o, digits),
+            "high": round(h, digits),
+            "low": round(l, digits),
+            "close": round(c, digits)
         })
 
         is_bullish = c >= o
@@ -506,11 +510,11 @@ def get_candles(symbol: str = "EURUSD", timeframe: str = "M5", limit: int = 1500
 
         sma20_val = row.get("sma20")
         if pd.notna(sma20_val):
-            sma20.append({"time": ts, "value": round(float(sma20_val), 5)})
+            sma20.append({"time": ts, "value": round(float(sma20_val), digits)})
 
         sma50_val = row.get("sma50")
         if pd.notna(sma50_val):
-            sma50.append({"time": ts, "value": round(float(sma50_val), 5)})
+            sma50.append({"time": ts, "value": round(float(sma50_val), digits)})
 
         rsi_val = row.get("rsi14")
         if pd.notna(rsi_val):
@@ -520,6 +524,8 @@ def get_candles(symbol: str = "EURUSD", timeframe: str = "M5", limit: int = 1500
 
     return {
         "symbol": symbol,
+        "timeframe": tf_norm,
+        "digits": digits,
         "total_candles": len(df),
         "latest_price": latest_price,
         "candles": candles,
@@ -567,18 +573,34 @@ def get_orders():
 @app.post("/api/orders/place")
 def place_order(req: OrderPlaceRequest):
     """
-    Nhận lệnh đặt từ giao diện người dùng kèm thẩm định R:R & Quản lý rủi ro.
+    Nhận lệnh đặt từ giao diện người dùng kèm Bộ lọc Max Spread, kiểm tra Free Margin,
+    thẩm định R:R, tính phí Commission & đẩy lệnh xuống MT5 thật.
     """
     if req.lot_size <= 0:
         raise HTTPException(status_code=400, detail="Số lot phải lớn hơn 0")
 
-    # Kiểm tra Cầu dao ngắt mạch 24h
+    from mt5_connector import (
+        get_current_spread_pips,
+        get_contract_multiplier,
+    )
+    from executor import MT5Executor
+
+    # 1. Kiểm tra Cầu dao ngắt mạch 24h
     engine = AITradingEngine()
     locked_24h, lock_reason = engine.risk_manager.is_locked_24h()
     if locked_24h:
         raise HTTPException(status_code=403, detail=f"Cầu dao ngắt mạch 24H đang kích hoạt: {lock_reason}. Không thể đặt lệnh mới!")
 
-    # Xác định entry_price (Forex)
+    # 2. Kiểm tra Bộ lọc Max Spread thời gian thực (Mục 2 PDF)
+    current_spread = get_current_spread_pips(req.symbol)
+    max_spread = config.MAX_ALLOWED_SPREAD.get(req.symbol, config.MAX_ALLOWED_SPREAD.get("DEFAULT", 2.0))
+    if current_spread < 900.0 and current_spread > max_spread:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Spread {req.symbol} hiện tại ({current_spread} pips) vượt trần cho phép ({max_spread} pips). Hệ thống chặn lệnh để bảo vệ vốn!",
+        )
+
+    # 3. Xác định entry_price
     if req.entry_price and req.entry_price > 0:
         entry_price = float(req.entry_price)
     elif req.entry_price_vnd and req.entry_price_vnd > 0:
@@ -586,18 +608,20 @@ def place_order(req: OrderPlaceRequest):
     else:
         raise HTTPException(status_code=400, detail="Vui lòng nhập mức giá muốn đánh hợp lệ")
 
-    mult = 100.0 if "XAU" in req.symbol or "GOLD" in req.symbol else 100000.0
+    mult = get_contract_multiplier(req.symbol)
+    comm_per_lot = float(getattr(config, "COMMISSION_PER_LOT_USD", 7.0))
+    est_comm_usd = round(float(req.lot_size) * comm_per_lot, 2)
 
-    # Xác định target_price
+    # 4. Xác định target_price (nếu nhập theo lợi nhuận USD/VNĐ mong muốn thì tự động cộng bù phí Commission)
     if req.target_price and req.target_price > 0:
         target_price = float(req.target_price)
     elif req.target_profit_usd and req.target_profit_usd > 0:
-        diff = float(req.target_profit_usd) / (mult * req.lot_size)
+        diff = (float(req.target_profit_usd) + est_comm_usd) / (mult * req.lot_size)
         target_price = entry_price + diff if req.order_type.upper() == "BUY" else entry_price - diff
     elif req.target_price_vnd and req.target_price_vnd > 0:
         target_price = float(req.target_price_vnd) / USD_VND_RATE
     elif req.target_profit_vnd and req.target_profit_vnd > 0:
-        desired_usd = float(req.target_profit_vnd) / USD_VND_RATE
+        desired_usd = (float(req.target_profit_vnd) / USD_VND_RATE) + est_comm_usd
         diff = desired_usd / (mult * req.lot_size)
         target_price = entry_price + diff if req.order_type.upper() == "BUY" else entry_price - diff
     else:
@@ -609,7 +633,17 @@ def place_order(req: OrderPlaceRequest):
         diff_sl = abs(target_price - entry_price) / 2.0  # R:R chuẩn 1:2
         sl_price = entry_price - diff_sl if req.order_type.upper() == "BUY" else entry_price + diff_sl
 
-    # Thẩm định tỷ lệ R:R theo CHƯƠNG 3.1 (Tối thiểu 1:1.5)
+    # 5. Kiểm tra Free Margin khả dụng
+    margin_ok, capped_lot, margin_msg = engine.risk_manager.check_free_margin_and_cap_lot(
+        symbol=req.symbol,
+        order_type=req.order_type.upper(),
+        lot_size=req.lot_size,
+        entry_price=entry_price,
+    )
+    if not margin_ok:
+        raise HTTPException(status_code=400, detail=margin_msg)
+
+    # 6. Thẩm định tỷ lệ R:R theo CHƯƠNG 3.1 (Tối thiểu 1:1.5)
     rr_valid, calc_rr, _, _, rr_msg = engine.risk_manager.check_rr_ratio(
         entry_price=entry_price,
         sl_price=sl_price,
@@ -619,15 +653,26 @@ def place_order(req: OrderPlaceRequest):
         raise HTTPException(status_code=400, detail=f"{rr_msg} Vui lòng điều chỉnh TP hoặc SL hợp lý.")
 
     if req.order_type.upper() == "BUY":
-        expected_profit_usd = (target_price - entry_price) * mult * req.lot_size
+        gross_expected_usd = (target_price - entry_price) * mult * req.lot_size
     else:
-        expected_profit_usd = (entry_price - target_price) * mult * req.lot_size
+        gross_expected_usd = (entry_price - target_price) * mult * req.lot_size
 
+    # Trừ phí hoa hồng Round-Turn (7 USD / lot) để hiển thị đúng Lãi ròng thực nhận
+    expected_profit_usd = round(gross_expected_usd - est_comm_usd, 2)
     expected_profit_vnd = expected_profit_usd * USD_VND_RATE
     entry_price_vnd = entry_price * USD_VND_RATE
     target_price_vnd = target_price * USD_VND_RATE
 
-    ticket_id = random.randint(10126000, 10129999)
+    # 7. Đẩy lệnh xuống Terminal MT5 thật (hoặc MockMT5)
+    mt5_ticket = MT5Executor.open_position(
+        symbol=req.symbol,
+        order_type=req.order_type.upper(),
+        lot_size=req.lot_size,
+        sl_price=sl_price,
+        tp_price=target_price,
+        comment="WebUI_Manual_Order",
+    )
+    ticket_id = int(mt5_ticket) if mt5_ticket else random.randint(10126000, 10129999)
     open_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
     current_case = engine.latest_state.get("market_case", "CASE_A_TREND")
@@ -637,12 +682,12 @@ def place_order(req: OrderPlaceRequest):
     with get_connection() as conn:
         cursor = conn.cursor()
         cursor.execute("""
-            INSERT INTO orders 
-            (ticket_id, symbol, order_type, lot_size, open_time, open_price, stop_loss, take_profit, profit, status, market_case, rr_ratio)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0.0, 'OPEN', ?, ?);
-        """, (ticket_id, req.symbol, req.order_type.upper(), req.lot_size, open_time, entry_price, sl_price, target_price, current_case, calc_rr))
+            INSERT OR REPLACE INTO orders 
+            (ticket_id, symbol, order_type, lot_size, open_time, open_price, stop_loss, take_profit, commission, swap, profit, status, market_case, rr_ratio)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0.0, ?, 'OPEN', ?, ?);
+        """, (ticket_id, req.symbol, req.order_type.upper(), req.lot_size, open_time, entry_price, sl_price, target_price, est_comm_usd, -est_comm_usd, current_case, calc_rr))
 
-        msg = f"Đã vào lệnh {req.order_type.upper()} #{ticket_id} {req.lot_size} lot {req.symbol} tại giá {entry_price:.5f}, TP {target_price:.5f} - Dự kiến lãi: +${expected_profit_usd:.2f} USD (R:R 1:{calc_rr:.2f})"
+        msg = f"Đã vào lệnh {req.order_type.upper()} #{ticket_id} {req.lot_size} lot {req.symbol} tại giá {entry_price:.5f}, TP {target_price:.5f} - Dự kiến lãi ròng (đã trừ Comm ${est_comm_usd:.2f}): +${expected_profit_usd:.2f} USD (R:R 1:{calc_rr:.2f})"
         cursor.execute("INSERT INTO bot_logs (log_level, module, message) VALUES ('INFO', 'order_entry', ?);", (msg,))
 
         cursor.execute("""
@@ -661,6 +706,7 @@ def place_order(req: OrderPlaceRequest):
         "target_price": round(target_price, 5),
         "target_price_vnd": round(target_price_vnd),
         "rr_ratio": round(calc_rr, 2),
+        "commission_usd": est_comm_usd,
         "expected_profit_usd": round(expected_profit_usd, 2),
         "expected_profit_vnd": round(expected_profit_vnd)
     }
@@ -668,48 +714,64 @@ def place_order(req: OrderPlaceRequest):
 
 @app.post("/api/orders/close/{ticket_id}")
 def close_order(ticket_id: int):
-    """Đóng lệnh giao dịch thủ công."""
+    """Đóng lệnh giao dịch thủ công trên cả Terminal MT5 và SQLite (trừ đủ Spread, Commission & Swap)."""
+    from mt5_connector import get_contract_multiplier, get_position_swap_and_commission
+    from executor import MT5Executor
+
     close_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     with get_connection() as conn:
         cursor = conn.cursor()
-        cursor.execute("SELECT symbol, order_type, lot_size, open_price, take_profit FROM orders WHERE ticket_id = ? AND status = 'OPEN';", (ticket_id,))
+        cursor.execute("SELECT symbol, order_type, lot_size, open_price, take_profit, open_time FROM orders WHERE ticket_id = ? AND status = 'OPEN';", (ticket_id,))
         row = cursor.fetchone()
         if not row:
             raise HTTPException(status_code=404, detail="Không tìm thấy lệnh mở với Ticket này")
 
-        symbol, o_type, lot_size, open_price, take_profit = row
-        tick = mt5.symbol_info_tick(symbol) if mt5 else None
-        if tick is not None:
-            close_price = float(tick.bid if o_type == "BUY" else tick.ask)
-        else:
-            close_price = take_profit if take_profit else open_price
+        symbol, o_type, lot_size, open_price, take_profit, open_time = row
+        # Đóng vị thế tương ứng trên Terminal MT5 thật (nếu đang mở)
+        MT5Executor.close_position_by_ticket(int(ticket_id))
 
-        mult = 100.0 if "XAU" in symbol or "GOLD" in symbol else 100000.0
-        gross_profit = (close_price - open_price) * mult * lot_size if o_type == "BUY" else (open_price - close_price) * mult * lot_size
-        comm_per_lot = float(getattr(config, "COMMISSION_PER_LOT_USD", 7.0))
-        profit = round(gross_profit - (float(lot_size) * comm_per_lot), 2)
+        from mt5_connector import sync_closed_deal_from_mt5
+        synced_deal = sync_closed_deal_from_mt5(int(ticket_id)) if not hasattr(mt5, "set_balance") else None
+        if synced_deal is not None:
+            close_price = synced_deal["close_price"] or open_price
+            comm_usd = synced_deal["commission"]
+            swap_usd = synced_deal["swap"]
+            profit = synced_deal["net_profit"]
+        else:
+            tick = mt5.symbol_info_tick(symbol) if mt5 else None
+            if tick is not None:
+                close_price = float(tick.bid if o_type == "BUY" else tick.ask)
+            else:
+                close_price = take_profit if take_profit else open_price
+
+            mult = get_contract_multiplier(symbol)
+            gross_profit = (close_price - open_price) * mult * lot_size if o_type == "BUY" else (open_price - close_price) * mult * lot_size
+            swap_usd, comm_usd = get_position_swap_and_commission(ticket_id, symbol, lot_size, open_time)
+            profit = round(gross_profit - comm_usd + swap_usd, 2)
 
         cursor.execute("""
             UPDATE orders 
-            SET close_time = ?, close_price = ?, profit = ?, close_reason = 'MANUAL_CLOSE', status = 'CLOSED'
+            SET close_time = ?, close_price = ?, commission = ?, swap = ?, profit = ?, close_reason = 'MANUAL_CLOSE', status = 'CLOSED'
             WHERE ticket_id = ?;
-        """, (close_time, close_price, profit, ticket_id))
+        """, (close_time, close_price, comm_usd, swap_usd, profit, ticket_id))
 
         cursor.execute("""
             INSERT INTO bot_logs (log_level, module, message)
             VALUES ('INFO', 'order_close', ?);
-        """, (f"Đã đóng lệnh #{ticket_id} {symbol} tại {close_price}, lợi nhuận: +${profit:.2f} ({profit * USD_VND_RATE:,.0f} đ)",))
+        """, (f"Đã đóng lệnh #{ticket_id} {symbol} tại {close_price}, lợi nhuận ròng (Comm -${comm_usd:.2f}, Swap ${swap_usd:.2f}): ${profit:.2f} ({profit * USD_VND_RATE:,.0f} đ)",))
 
         conn.commit()
 
-    # Cộng lợi nhuận thực tế vào số dư tài khoản
+    # Đồng bộ số dư tài khoản (nếu chạy MT5 thật thì lấy trực tiếp số dư Exness sau khi đóng lệnh)
     acc = mt5.account_info() if mt5 else None
     if acc is not None:
-        new_bal = round(float(acc.balance) + profit, 2)
+        if hasattr(mt5, "set_balance"):
+            new_bal = round(float(acc.balance) + profit, 2)
+            mt5.set_balance(new_bal)
+        else:
+            new_bal = round(float(acc.balance), 2)
         config.MT5_BALANCE = new_bal
         set_setting("account_balance", str(new_bal))
-        if hasattr(mt5, "set_balance"):
-            mt5.set_balance(new_bal)
 
     return {"success": True, "ticket_id": ticket_id, "profit": profit}
 

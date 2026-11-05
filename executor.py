@@ -152,6 +152,27 @@ class MT5Executor:
         return True
 
     @classmethod
+    def modify_position_sl_tp(cls, ticket_id: int, symbol: str, sl_price: float, tp_price: float) -> bool:
+        """
+        Cập nhật (Dời) Stop-Loss và Take-Profit trực tiếp trên máy chủ MT5 Exness
+        phục vụ cơ chế Break-Even (Dời SL về hòa vốn) & Trailing Stop (Khóa lãi tự động).
+        """
+        sl_norm = cls._normalize_price(symbol, float(sl_price))
+        tp_norm = cls._normalize_price(symbol, float(tp_price))
+        request = {
+            "action": getattr(mt5, "TRADE_ACTION_SLTP", 6),
+            "position": int(ticket_id),
+            "symbol": symbol,
+            "sl": sl_norm,
+            "tp": tp_norm,
+        }
+        result = mt5.order_send(request)
+        if result is None or result.retcode != mt5.TRADE_RETCODE_DONE:
+            return False
+        logging.info(f"🛡️ [TRAILING / BREAK-EVEN] Đã dời SL lệnh #{ticket_id} ({symbol}) lên {sl_norm} (TP: {tp_norm}).")
+        return True
+
+    @classmethod
     def get_open_positions(cls, magic_number: Optional[int] = None) -> list:
         """Lấy danh sách các lệnh đang chạy của bot."""
         positions = mt5.positions_get()
@@ -203,31 +224,32 @@ def close_all_positions() -> int:
         from datetime import datetime
         from db import get_connection, set_setting
         from config import config
+        from mt5_connector import get_contract_multiplier, get_position_swap_and_commission
 
         close_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         with get_connection() as conn:
             cursor = conn.cursor()
             cursor.execute(
-                "SELECT ticket_id, symbol, order_type, lot_size, open_price FROM orders WHERE status = 'OPEN';"
+                "SELECT ticket_id, symbol, order_type, lot_size, open_price, open_time FROM orders WHERE status = 'OPEN';"
             )
             open_orders = cursor.fetchall()
             realized_delta = 0.0
-            comm_per_lot = float(getattr(config, "COMMISSION_PER_LOT_USD", 7.0))
-            for ticket_id, sym, o_type, lot, o_price in open_orders:
+            for ticket_id, sym, o_type, lot, o_price, o_time in open_orders:
                 tick = mt5.symbol_info_tick(sym)
                 close_price = float(tick.bid if o_type == "BUY" else tick.ask) if tick else float(o_price)
-                mult = 100.0 if "XAU" in sym or "GOLD" in sym else 100000.0
+                mult = get_contract_multiplier(sym)
                 gross_profit = (close_price - o_price) * mult * lot if o_type == "BUY" else (o_price - close_price) * mult * lot
-                profit = round(gross_profit - (float(lot) * comm_per_lot), 2)
+                swap_usd, comm_usd = get_position_swap_and_commission(ticket_id, sym, lot, o_time)
+                profit = round(gross_profit - comm_usd + swap_usd, 2)
                 realized_delta += profit
 
                 cursor.execute(
                     """
                     UPDATE orders
-                    SET close_time = ?, close_price = ?, profit = ?, close_reason = 'TARGET_GOAL_REACHED', status = 'CLOSED'
+                    SET close_time = ?, close_price = ?, commission = ?, swap = ?, profit = ?, close_reason = 'TARGET_GOAL_REACHED', status = 'CLOSED'
                     WHERE ticket_id = ?;
                     """,
-                    (close_time, close_price, profit, ticket_id),
+                    (close_time, close_price, comm_usd, swap_usd, profit, ticket_id),
                 )
                 closed_count += 1
 

@@ -12,14 +12,27 @@ MAX_ALLOWED_SPREAD: Dict[str, float] = {
     "GBPUSD": 2.0,   # Trần 2.0 pips cho GBPUSD
     "USDJPY": 1.8,   # Trần 1.8 pips cho USDJPY
     "XAUUSD": 3.5,   # Trần 3.5 pips (0.35 giá) cho Vàng
+    "BTCUSD": 50.0,  # Trần 50.0 pips ($50) cho BTCUSD
     "DEFAULT": 2.0,
 }
 
-# 2. Cấu hình Rủi ro 1R & Phí Hoa Hồng Round-Turn (Mục 3, 4, 5 Tài liệu)
+# 2. Cấu hình Rủi ro 1R, Phí Hoa Hồng Round-Turn, Độ Trượt Giá (Slippage) & Phí Qua Đêm (Swap)
 RISK_PER_TRADE: float = float(os.getenv("RISK_PER_TRADE") or 0.01)
 COMMISSION_PER_LOT_USD: float = float(os.getenv("COMMISSION_PER_LOT_USD") or 7.0)
 COMMISSION_BUFFER_PIPS: float = float(os.getenv("COMMISSION_BUFFER_PIPS") or 0.7)
+SLIPPAGE_BUFFER_PIPS: float = float(os.getenv("SLIPPAGE_BUFFER_PIPS") or 0.3)
+MIN_FREE_MARGIN_RATIO: float = float(os.getenv("MIN_FREE_MARGIN_RATIO") or 0.15)
 USE_CUSTOM_LOT: bool = os.getenv("USE_CUSTOM_LOT", "false").lower() in ("true", "1", "yes")
+
+# Phí Swap qua đêm ước tính (USD / 1 Lot / đêm) khi sàn chưa trả về swap realtime (Thứ Tư tính x3)
+SWAP_PER_LOT_DAILY_USD: Dict[str, float] = {
+    "EURUSD": -2.5,
+    "GBPUSD": -3.0,
+    "USDJPY": -2.0,
+    "XAUUSD": -12.0,
+    "BTCUSD": -18.0,
+    "DEFAULT": -3.0,
+}
 
 
 class Config:
@@ -32,11 +45,14 @@ class Config:
     DB_PATH: Path = BASE_DIR / os.getenv("DB_NAME", "trading_bot.db")
     LOG_PATH: Path = BASE_DIR / "trading.log"
 
-    # Bộ lọc Spread tối đa & Phí Hoa Hồng Round-Turn (Mục 2, 3, 4, 5)
+    # Bộ lọc Spread tối đa, Phí Hoa Hồng Round-Turn, Slippage, Swap & Free Margin
     MAX_ALLOWED_SPREAD: Dict[str, float] = MAX_ALLOWED_SPREAD
     RISK_PER_TRADE: float = RISK_PER_TRADE
     COMMISSION_PER_LOT_USD: float = COMMISSION_PER_LOT_USD
     COMMISSION_BUFFER_PIPS: float = COMMISSION_BUFFER_PIPS
+    SLIPPAGE_BUFFER_PIPS: float = SLIPPAGE_BUFFER_PIPS
+    MIN_FREE_MARGIN_RATIO: float = MIN_FREE_MARGIN_RATIO
+    SWAP_PER_LOT_DAILY_USD: Dict[str, float] = SWAP_PER_LOT_DAILY_USD
     USE_CUSTOM_LOT: bool = USE_CUSTOM_LOT
 
     # Các biến cấu hình động điều khiển Bot AI (v2 - Đơn vị chuẩn USD)

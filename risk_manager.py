@@ -20,6 +20,7 @@ except (ImportError, ModuleNotFoundError):
 from ai_math_models import MonteCarloRiskEstimator
 import config as config_module
 from config import config, BASE_DIR
+from mt5_connector import get_pip_value_per_lot, get_contract_multiplier
 
 # Cấu hình ghi log ra cả console và tệp trading.log (Chương 4.3)
 _log_formatter = logging.Formatter("%(asctime)s - [%(levelname)s] - %(message)s")
@@ -71,20 +72,84 @@ class RiskManager:
             return round(float(custom_lot), 2)
         return 0.01  # Mặc định an toàn
 
-    def calculate_standard_lot(self, balance: float, sl_pips: float, pip_value: float = 10.0) -> float:
+    def calculate_standard_lot(
+        self,
+        balance: float,
+        sl_pips: float,
+        pip_value: float = 10.0,
+        symbol: Optional[str] = None,
+        entry_price: float = 0.0,
+        include_slippage: bool = False,
+    ) -> float:
         """
         Tính Lot Size chuẩn gộp cả phí hoa hồng để chỉ mất đúng 1R (Mục 4 & 5 Tài liệu Nâng cấp):
-        Lot Size = (Tổng Vốn * % Rủi Ro) / [ (SL Pips * Pip Value) + Commission Per Lot ]
+        Lot Size = (Tổng Vốn * % Rủi Ro) / [ ((SL Pips + Slippage Buffer) * Pip Value) + Commission Per Lot ]
+        - Tự động quy đổi `pip_value` động theo `symbol` (EURUSD, XAUUSD, BTCUSD, USDJPY...) nếu truyền `symbol`.
         """
         if getattr(config, "USE_CUSTOM_LOT", False) and config.CUSTOM_LOT_SIZE > 0:
             return config.CUSTOM_LOT_SIZE
+        if symbol:
+            pip_value = get_pip_value_per_lot(symbol, entry_price)
+        effective_sl_pips = float(sl_pips) + (float(getattr(config, "SLIPPAGE_BUFFER_PIPS", 0.3)) if include_slippage else 0.0)
         risk_money = balance * getattr(config, "RISK_PER_TRADE", 0.01)
         comm_per_lot = getattr(config, "COMMISSION_PER_LOT_USD", 7.0)
-        cost_per_lot = (sl_pips * pip_value) + comm_per_lot
+        cost_per_lot = (effective_sl_pips * pip_value) + comm_per_lot
         if cost_per_lot <= 0:
             return 0.01
         raw_lot = risk_money / cost_per_lot
         return max(0.01, round(raw_lot - 0.005, 2))  # Làm tròn xuống bước 0.01
+
+    def check_free_margin_and_cap_lot(
+        self,
+        symbol: str,
+        order_type: str,
+        lot_size: float,
+        entry_price: float,
+    ) -> Tuple[bool, float, str]:
+        """
+        Kiểm tra Tiền ký quỹ khả dụng (Free Margin & Margin Level %) trước khi mở lệnh trên Ví thực:
+        - Chống lỗi `TRADE_RETCODE_NO_MONEY` khi đòn bẩy thấp hoặc SL ngắn khiến Lot phình to.
+        - Giữ lại tối thiểu `MIN_FREE_MARGIN_RATIO` (15%) Free Margin dự phòng chống Stop-Out.
+        """
+        acc = mt5.account_info() if mt5 else None
+        if acc is None:
+            return True, lot_size, "Không lấy được account_info, giữ nguyên lot."
+
+        equity = float(getattr(acc, "equity", getattr(acc, "balance", 10000.0)))
+        margin_free = float(getattr(acc, "margin_free", equity))
+        min_keep_ratio = float(getattr(config, "MIN_FREE_MARGIN_RATIO", 0.15))
+        usable_free_margin = max(0.0, margin_free - (equity * min_keep_ratio))
+
+        action = getattr(mt5, "ORDER_TYPE_BUY", 0) if order_type.upper() == "BUY" else getattr(mt5, "ORDER_TYPE_SELL", 1)
+        req_margin_1lot = None
+        if hasattr(mt5, "order_calc_margin"):
+            try:
+                req_margin_1lot = mt5.order_calc_margin(action, symbol, 1.0, entry_price)
+            except Exception:
+                req_margin_1lot = None
+
+        if not req_margin_1lot or req_margin_1lot <= 0:
+            leverage = float(getattr(acc, "leverage", 100) or 100)
+            mult = get_contract_multiplier(symbol)
+            notional_1lot = mult if symbol.upper().startswith("USD") else (mult * max(entry_price, 0.0001))
+            req_margin_1lot = notional_1lot / max(leverage, 1.0)
+
+        required_margin = lot_size * req_margin_1lot
+        if required_margin <= usable_free_margin:
+            return True, lot_size, f"Đủ Free Margin (${usable_free_margin:,.2f} >= ${required_margin:,.2f})."
+
+        # Nếu vượt quá Free Margin khả dụng -> hạ Lot xuống mức tối đa tài khoản chịu được
+        max_affordable_lot = round((usable_free_margin / req_margin_1lot) - 0.005, 2)
+        if max_affordable_lot < 0.01:
+            return (
+                False,
+                0.0,
+                f"Không đủ Free Margin khả dụng (${margin_free:,.2f} USD) để mở tối thiểu 0.01 lot {symbol} (cần ${req_margin_1lot * 0.01:,.2f} USD).",
+            )
+        logging.warning(
+            f"⚠️ [FREE MARGIN CAP] Hạ Lot {symbol} từ {lot_size} xuống {max_affordable_lot} lot để bảo toàn Free Margin (${usable_free_margin:,.2f})."
+        )
+        return True, max_affordable_lot, f"Đã giới hạn Lot xuống {max_affordable_lot} theo Free Margin."
 
     def calculate_tp_with_buffer(self, entry: float, sl: float, order_type: str, point: float = 0.0001) -> float:
         """
@@ -121,6 +186,130 @@ class RiskManager:
             logging.info(msg)
             return True
         return False
+
+    def is_capital_stop_out_reached(
+        self,
+        bot_equity: float,
+        initial_capital: Optional[float] = None,
+    ) -> Tuple[bool, float, str]:
+        """
+        Cầu dao Chống Cháy Vốn Đánh (Hard Capital Stop-Out Protection):
+        - Bảo vệ phần `Vốn đánh (Initial Capital)` mà người dùng cấp cho Bot (VD: $100 USD trên tổng ví $100,000 USD).
+        - Khi `bot_equity` sụt giảm chạm ngưỡng sàn an toàn (20% Vốn đánh ban đầu, tức lỗ tối đa 80% vốn cấp cho Bot),
+          hệ thống lập tức đóng toàn bộ lệnh và ngắt Bot để bảo toàn vốn còn lại và tuyệt đối không ăn lẹm vào số dư ví Exness gốc.
+        """
+        init_cap = float(
+            initial_capital
+            if initial_capital is not None
+            else (getattr(config, "INITIAL_CAPITAL", 0.0) or getattr(config_module, "INITIAL_CAPITAL", 0.0))
+        )
+        if init_cap <= 0:
+            return False, 0.0, ""
+
+        stop_out_floor = round(init_cap * 0.20, 2)
+        if bot_equity <= stop_out_floor:
+            msg = (
+                f"🛡️ [CAPITAL STOP-OUT] Vốn đánh thực tế (${bot_equity:,.2f} USD) đã chạm ngưỡng bảo vệ tối thiểu "
+                f"${stop_out_floor:,.2f} USD (20% của Vốn đánh ${init_cap:,.2f} USD). "
+                f"Tự động đóng toàn bộ vị thế và dừng Bot để chống cháy ví!"
+            )
+            logging.critical(msg)
+            return True, stop_out_floor, msg
+        return False, stop_out_floor, ""
+
+    def evaluate_trailing_and_breakeven(
+        self,
+        order_type: str,
+        open_price: float,
+        current_eval_price: float,
+        current_sl: float,
+        tp_price: float,
+        pip_size: float,
+        digits: int = 5,
+    ) -> Tuple[bool, float, str]:
+        """
+        Cơ chế 1: Dời SL về Hòa Vốn (Break-Even) & Khóa Lãi Tự Động (Trailing Stop):
+        - Khi giá chạy thuận chiều đạt >= 50% quãng đường tới TP:
+          Dời SL về `open_price +/- 1.0 pip` (bù phí Commission + Spread) -> Lệnh bất tử (Risk-Free).
+        - Khi giá chạy thuận chiều đạt >= 75% quãng đường tới TP:
+          Kích hoạt Trailing Stop khóa cứng 55% lợi nhuận đang nổi theo đà tăng của giá.
+        """
+        if not tp_price or tp_price <= 0 or open_price <= 0 or pip_size <= 0:
+            return False, current_sl, ""
+
+        o_type = order_type.upper()
+        if o_type == "BUY":
+            tp_dist = tp_price - open_price
+            if tp_dist <= 0:
+                return False, current_sl, ""
+            fav_dist = current_eval_price - open_price
+            progress = fav_dist / tp_dist
+
+            # Mốc 2: Đạt >= 75% quãng đường tới TP -> Khóa cứng 55% quãng đường lãi hiện tại
+            if progress >= 0.75:
+                trail_sl = round(open_price + (fav_dist * 0.55), digits)
+                if current_sl <= 0 or (trail_sl - current_sl) >= (0.5 * pip_size):
+                    return True, trail_sl, f"TRAILING_STOP (Đạt {progress * 100:.0f}% TP -> Khóa 55% lãi tại {trail_sl})"
+
+            # Mốc 1: Đạt >= 50% quãng đường tới TP -> Dời SL về Hòa vốn + 1.0 pip bù phí sàn
+            if progress >= 0.50:
+                be_sl = round(open_price + (1.0 * pip_size), digits)
+                if current_sl <= 0 or (be_sl - current_sl) >= (0.2 * pip_size):
+                    return True, be_sl, f"BREAKEVEN_LOCK (Đạt {progress * 100:.0f}% TP -> Dời SL về Hòa vốn +1 pip tại {be_sl})"
+
+        elif o_type == "SELL":
+            tp_dist = open_price - tp_price
+            if tp_dist <= 0:
+                return False, current_sl, ""
+            fav_dist = open_price - current_eval_price
+            progress = fav_dist / tp_dist
+
+            # Mốc 2: Đạt >= 75% quãng đường tới TP -> Khóa cứng 55% quãng đường lãi hiện tại
+            if progress >= 0.75:
+                trail_sl = round(open_price - (fav_dist * 0.55), digits)
+                if current_sl <= 0 or (current_sl - trail_sl) >= (0.5 * pip_size):
+                    return True, trail_sl, f"TRAILING_STOP (Đạt {progress * 100:.0f}% TP -> Khóa 55% lãi tại {trail_sl})"
+
+            # Mốc 1: Đạt >= 50% quãng đường tới TP -> Dời SL về Hòa vốn - 1.0 pip bù phí sàn
+            if progress >= 0.50:
+                be_sl = round(open_price - (1.0 * pip_size), digits)
+                if current_sl <= 0 or (current_sl - be_sl) >= (0.2 * pip_size):
+                    return True, be_sl, f"BREAKEVEN_LOCK (Đạt {progress * 100:.0f}% TP -> Dời SL về Hòa vốn +1 pip tại {be_sl})"
+
+        return False, current_sl, ""
+
+    def should_early_exit_position(
+        self,
+        order_type: str,
+        profit: float,
+        one_r_money: float,
+        recommended_action: str,
+        confidence: float,
+        market_case: str,
+        hmm_safe: bool,
+    ) -> Tuple[bool, str]:
+        """
+        Cơ chế 2: Đóng Lệnh Sớm Khi AI Phát Hiện Đảo Chiều Hoặc Nhiễu Loạn (AI Early Exit):
+        - Nếu đang giữ lệnh BUY mà AI phát hiện tín hiệu đảo chiều SELL mạnh (Confidence >= 75%) hoặc ngược lại -> Chốt sớm.
+        - Nếu thị trường rơi vào cấu trúc Loa Kèn Hỗn Loạn (CASE_C_BROADENING_CHAOS) / Bão tin tức (CASE_F_ROLLOVER_NEWS)
+          hoặc HMM báo HIGH_VOLATILITY_CHAOS (`hmm_safe == False`) khi lệnh đang có lãi nhẹ hoặc đang âm >= 0.6R -> Thoát lệnh sớm bảo toàn vốn.
+        """
+        o_type = order_type.upper()
+        rec_act = (recommended_action or "").upper()
+        conf_ratio = confidence / 100.0 if confidence > 1.0 else confidence
+
+        # 1. Đảo chiều xu hướng mạnh từ AI
+        if o_type == "BUY" and rec_act == "SELL" and conf_ratio >= 0.75:
+            return True, f"AI_REVERSAL_EXIT (AI báo đảo chiều SELL mạnh {conf_ratio * 100:.1f}%)"
+        if o_type == "SELL" and rec_act == "BUY" and conf_ratio >= 0.75:
+            return True, f"AI_REVERSAL_EXIT (AI báo đảo chiều BUY mạnh {conf_ratio * 100:.1f}%)"
+
+        # 2. Thị trường chuyển sang Hỗn loạn / Bão tin tức / HMM bất ổn
+        is_chaos = market_case in ("CASE_C_BROADENING_CHAOS", "CASE_F_ROLLOVER_NEWS") or (not hmm_safe)
+        if is_chaos and (profit > 0 or profit <= -0.60 * max(one_r_money, 1.0)):
+            return True, f"AI_CHAOS_EARLY_EXIT (Thị trường rơi vào {market_case}, đóng lệnh sớm bảo vệ vốn)"
+
+        return False, ""
 
     def update_daily_balance(self, current_balance: float) -> None:
         """Cập nhật số dư đầu ngày."""

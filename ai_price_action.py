@@ -187,18 +187,18 @@ class PriceActionAnalyzer:
         """
         Hiện thực hóa Case C: Đi Ngang Hỗn Loạn / Hình Cái Loa (Broadening Chaos Market)
         Đặc điểm:
-        - Đỉnh sau cao hơn đỉnh trước (High_k > High_{k-1})
-        - VÀ Đáy sau thấp hơn đáy trước (Low_k < Low_{k-1})
-        - Râu nến dài quét 2 đầu, nến có râu chiếm > 60% thân nến
+        - 3 đỉnh mở rộng liên tiếp (High_k > High_{k-1} > High_{k-2})
+        - VÀ 3 đáy mở rộng liên tiếp (Low_k < Low_{k-1} < Low_{k-2})
+        - Râu nến dài quét 2 đầu, ít nhất 6/10 nến gần nhất có râu chiếm > 72% toàn nến
         """
-        if len(pivot_highs) < 2 or len(pivot_lows) < 2:
+        if len(pivot_highs) < 3 or len(pivot_lows) < 3:
             return False
 
-        h_prev, h_curr = pivot_highs[-2]["price"], pivot_highs[-1]["price"]
-        l_prev, l_curr = pivot_lows[-2]["price"], pivot_lows[-1]["price"]
+        h1, h2, h3 = pivot_highs[-3]["price"], pivot_highs[-2]["price"], pivot_highs[-1]["price"]
+        l1, l2, l3 = pivot_lows[-3]["price"], pivot_lows[-2]["price"], pivot_lows[-1]["price"]
 
-        # Điều kiện loa kèn mở rộng: High mở rộng lên, Low mở rộng xuống
-        broadening = (h_curr > h_prev) and (l_curr < l_prev)
+        # Điều kiện loa kèn mở rộng thực sự qua 3 nhịp sóng
+        broadening = (h3 > h2 > h1) and (l3 < l2 < l1)
 
         # Kiểm tra râu nến dài bất thường ở các nến gần nhất
         recent_bars = df.tail(10)
@@ -207,10 +207,10 @@ class PriceActionAnalyzer:
             total_range = bar["high"] - bar["low"] + 1e-9
             body = abs(bar["close"] - bar["open"])
             wick = total_range - body
-            if (wick / total_range) > 0.60:
+            if (wick / total_range) > 0.72:
                 wick_dominance_count += 1
 
-        is_chaos = broadening and (wick_dominance_count >= 4)
+        is_chaos = broadening and (wick_dominance_count >= 6)
         return is_chaos
 
     def check_liquidity_sweep(
@@ -399,14 +399,14 @@ class PriceActionAnalyzer:
             )
 
         # -------------------------------------------------------------
-        # 5. KIỂM TRA CASE B: Đi Ngang Có Quy Luật (Compression)
+        # 5. KIỂM TRA CASE B: Đi Ngang Có Quy Luật (Compression Breakout)
         # -------------------------------------------------------------
         is_compressed, pattern_name, comp_details = self.check_compression(df, pivot_highs, pivot_lows)
         if is_compressed:
-            # Kiểm tra xem nến hiện tại có phải nến Breakout thân dài dứt khoát không
             curr_body = abs(float(last_row["close"]) - float(last_row["open"]))
-            last_atr = max(float(comp_details.get("atr_fast", 0.001)), 0.00060)
-            is_breakout = curr_body > (1.3 * comp_details.get("atr_fast", 0.001))
+            min_atr_b = max(float(last_row["close"]) * 0.0005, 0.00060)
+            last_atr = max(float(comp_details.get("atr_fast", 0.001)), min_atr_b)
+            is_breakout = curr_body > (1.2 * float(comp_details.get("atr_fast", 0.001)))
 
             if is_breakout:
                 action = TradeAction.BUY if float(last_row["close"]) > float(last_row["open"]) else TradeAction.SELL
@@ -419,7 +419,7 @@ class PriceActionAnalyzer:
                     recommended_action=action,
                     is_tradable=True,
                     confidence_modifier=0.25,
-                    reason=f"THỊ TƯỜNG NÉN ({pattern_name}): Xuất hiện nến Breakout thân dài dứt khoát ngoài vùng nén. Tỷ lệ R:R cao (1:2.5).",
+                    reason=f"THỊ TRƯỜNG NÉN ({pattern_name}): Xuất hiện nến Breakout thân dài dứt khoát ngoài vùng nén. Tỷ lệ R:R cao (1:2.5).",
                     details=comp_details,
                     entry_suggestion=round(entry, 5),
                     sl_suggestion=round(sl, 5),
@@ -427,22 +427,11 @@ class PriceActionAnalyzer:
                     compression_detected=True,
                     compression_pattern=pattern_name,
                 )
-            else:
-                return MarketAnalysisResult(
-                    market_case=MarketCase.CASE_B_COMPRESSION,
-                    recommended_action=TradeAction.HOLD,
-                    is_tradable=False,
-                    confidence_modifier=0.0,
-                    reason=f"THỊ TƯỜNG NÉN ({pattern_name}): Đang tích tụ năng lượng. Chờ nến Breakout dứt khoát.",
-                    details=comp_details,
-                    compression_detected=True,
-                    compression_pattern=pattern_name,
-                )
 
         # -------------------------------------------------------------
         # 6. KIỂM TRA CASE A: Trend Tăng / Giảm Rõ Ràng (Smooth Trend)
         # -------------------------------------------------------------
-        # Đánh giá cấu trúc Đỉnh/Đáy và EMA20 / EMA50
+        # Đánh giá cấu trúc Đỉnh/Đáy và EMA20 / EMA50 (tương thích mọi thị trường: Forex, Vàng, Crypto, Chỉ số, Cổ phiếu)
         ema20 = ta.ema(df["close"], length=20)
         ema50 = ta.ema(df["close"], length=50)
         atr14 = ta.atr(df["high"], df["low"], df["close"], length=14)
@@ -452,14 +441,15 @@ class PriceActionAnalyzer:
             last_ema20 = float(ema20.iloc[-1])
             last_ema50 = float(ema50.iloc[-1])
             raw_atr = float(atr14.iloc[-1]) if atr14 is not None and not pd.isna(atr14.iloc[-1]) else float(last_row["high"] - last_row["low"])
-            atr_val = max(raw_atr, 0.00060)  # Đảm bảo biên độ tối thiểu 6 pips để vượt qua kiểm định R:R >= 1.5 sau khi trừ Spread + Buffer
+            min_atr = max(last_c * 0.0005, 0.00060)
+            atr_val = max(raw_atr, min_atr)
 
-            is_bullish_trend = (last_ema20 > last_ema50) and (last_c >= last_ema20 * 0.9985)
-            is_bearish_trend = (last_ema20 < last_ema50) and (last_c <= last_ema20 * 1.0015)
+            is_bullish_trend = (last_ema20 > last_ema50) or (last_c > last_ema20 and last_c >= last_ema50)
+            is_bearish_trend = (last_ema20 < last_ema50) or (last_c < last_ema20 and last_c <= last_ema50)
 
-            # Kiểm tra giá hồi về căn cứ EMA20 hoặc tiếp diễn xu hướng mượt
-            pullback_bull = is_bullish_trend and (abs(last_c - last_ema20) < 0.0035)
-            pullback_bear = is_bearish_trend and (abs(last_c - last_ema20) < 0.0035)
+            max_pullback_dist = max(4.5 * atr_val, last_c * 0.0035)
+            pullback_bull = is_bullish_trend and (abs(last_c - last_ema20) <= max_pullback_dist)
+            pullback_bear = is_bearish_trend and (abs(last_c - last_ema20) <= max_pullback_dist)
 
             if pullback_bull:
                 entry = last_c
@@ -470,7 +460,7 @@ class PriceActionAnalyzer:
                     recommended_action=TradeAction.BUY,
                     is_tradable=True,
                     confidence_modifier=0.25,
-                    reason="THỊ TƯỜNG LÀNH (Trend Tăng Mượt): Giá hồi về căn cứ EMA20 + có tín hiệu ủng hộ xu hướng. Winrate > 65%.",
+                    reason="THỊ TRƯỜNG LÀNH (Trend Tăng Mượt): Giá bám sát căn cứ EMA20 + tín hiệu ủng hộ xu hướng. Winrate > 65%.",
                     details={"trend": "BULLISH_SMOOTH"},
                     entry_suggestion=round(entry, 5),
                     sl_suggestion=round(sl, 5),
@@ -485,12 +475,24 @@ class PriceActionAnalyzer:
                     recommended_action=TradeAction.SELL,
                     is_tradable=True,
                     confidence_modifier=0.25,
-                    reason="THỊ TƯỜNG LÀNH (Trend Giảm Mượt): Giá hồi về căn cứ EMA20 + nến thuận xu hướng. Winrate > 65%.",
+                    reason="THỊ TRƯỜNG LÀNH (Trend Giảm Mượt): Giá bám sát căn cứ EMA20 + nến thuận xu hướng. Winrate > 65%.",
                     details={"trend": "BEARISH_SMOOTH"},
                     entry_suggestion=round(entry, 5),
                     sl_suggestion=round(sl, 5),
                     tp_suggestion=round(tp, 5),
                 )
+
+        if is_compressed:
+            return MarketAnalysisResult(
+                market_case=MarketCase.CASE_B_COMPRESSION,
+                recommended_action=TradeAction.HOLD,
+                is_tradable=False,
+                confidence_modifier=0.0,
+                reason=f"THỊ TRƯỜNG NÉN ({pattern_name}): Đang tích tụ năng lượng. Chờ nến Breakout dứt khoát.",
+                details=comp_details,
+                compression_detected=True,
+                compression_pattern=pattern_name,
+            )
 
         # Mặc định: Giữ trạng thái quan sát (HOLD)
         return MarketAnalysisResult(

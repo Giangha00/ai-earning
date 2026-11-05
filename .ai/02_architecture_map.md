@@ -11,6 +11,7 @@ graph TD
         DB --> T2["bot_signals"]
         DB --> T3["daily_equity"]
         DB --> T4["bot_logs"]
+        MQL5["mql5_signal_crawler.py"] --> MQL5_DATA["data/mql5_signals/*.parquet"]
     end
 
     subgraph Quantitative AI Brain

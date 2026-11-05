@@ -8,10 +8,14 @@ Kiểm thử toàn diện toàn bộ thuật toán trong Sổ tay AI Trading For
 - CHƯƠNG 5: Hyperparameters & Luồng thực thi lệnh
 """
 
+import os
 import time
 import numpy as np
 import pandas as pd
 from datetime import datetime, timezone
+
+# Luôn dùng MockMT5 khi chạy bộ kiểm thử tự động để không bắn lệnh test lên tài khoản Exness thật
+os.environ["MT5_FORCE_MOCK"] = "1"
 
 from mt5_connector import MT5Connector, mt5
 from risk_manager import RiskManager
@@ -294,6 +298,148 @@ def test_spread_filter_commission_and_lot_1r():
     print("\n🎉 TẤT CẢ 7 BÀI TEST (BAO GỒM BỘ LỌC SPREAD, COMMISSION 7 USD/LOT & LOT 1R) ĐÃ VƯỢT QUA 100%!")
 
 
+def test_real_wallet_swap_slippage_margin_and_sync():
+    print("\n" + "=" * 50)
+    print("TEST 8: HOÀN THIỆN VÍ THỰC (SWAP, SLIPPAGE, PIP VALUE ĐỘNG, FREE MARGIN & DEAL SYNC)")
+    print("=" * 50)
+
+    from datetime import datetime, timedelta
+    from mt5_connector import (
+        get_contract_multiplier,
+        get_pip_value_per_lot,
+        calculate_rollover_swap,
+        sync_closed_deal_from_mt5,
+    )
+
+    MT5Connector.connect()
+    rm = RiskManager()
+
+    # 1. Kiểm tra Contract Multiplier & Pip Value động cho đa tài sản (EURUSD, XAUUSD, BTCUSD, USDJPY)
+    assert get_contract_multiplier("EURUSD") == 100000.0
+    assert get_contract_multiplier("XAUUSD") == 100.0
+    assert get_contract_multiplier("BTCUSD") == 1.0
+    pip_eur = get_pip_value_per_lot("EURUSD", 1.1000)
+    pip_jpy = get_pip_value_per_lot("USDJPY", 150.00)
+    pip_btc = get_pip_value_per_lot("BTCUSD", 68000.0)
+    print(f"-> Pip Value chuẩn: EURUSD=${pip_eur}/lot | USDJPY@150=${pip_jpy}/lot | BTCUSD=${pip_btc}/lot")
+    assert pip_eur == 10.0
+    assert round(pip_jpy, 2) == 6.67
+    assert pip_btc == 1.0
+
+    # 2. Kiểm tra Phí qua đêm (Swap / Rollover) cho lệnh giữ 2 ngày trước
+    two_days_ago = (datetime.now() - timedelta(days=2)).strftime("%Y-%m-%d %H:%M:%S")
+    swap_val = calculate_rollover_swap("EURUSD", 1.0, two_days_ago)
+    print(f"-> Phí Swap qua đêm (1.0 lot EURUSD mở từ {two_days_ago[:10]}): ${swap_val:.2f} USD")
+    assert swap_val < 0.0
+
+    # 3. Kiểm tra Lot 1R có tính thêm Slippage Buffer (0.3 pips)
+    lot_with_slip = rm.calculate_standard_lot(
+        balance=10000.0,
+        sl_pips=20.0,
+        symbol="EURUSD",
+        entry_price=1.1000,
+        include_slippage=True,
+    )
+    print(f"-> Lot 1R có dự phòng Slippage (+0.3 pips): {lot_with_slip} Lot (<= 0.48 Lot)")
+    assert lot_with_slip <= 0.48
+
+    # 4. Kiểm tra giới hạn Lot theo Free Margin (chống lỗi TRADE_RETCODE_NO_MONEY)
+    margin_ok, capped_lot, margin_msg = rm.check_free_margin_and_cap_lot(
+        symbol="EURUSD",
+        order_type="BUY",
+        lot_size=500.0,  # Cố tình yêu cầu 500 lot vượt quá Free Margin
+        entry_price=1.1000,
+    )
+    print(f"-> Kiểm tra Free Margin với 500 Lot: OK={margin_ok} | Lot sau khi giới hạn={capped_lot} | {margin_msg}")
+    assert margin_ok is True
+    assert capped_lot < 500.0
+
+    # 5. Kiểm tra đồng bộ Deal thực tế từ MT5 (`sync_closed_deal_from_mt5`)
+    t_id = MT5Executor.open_position("EURUSD", "BUY", 0.10, 1.1200, 1.1350)
+    assert t_id is not None
+    closed_ok = MT5Executor.close_position_by_ticket(t_id)
+    assert closed_ok is True
+    synced = sync_closed_deal_from_mt5(t_id)
+    print(f"-> Đồng bộ lịch sử Deal MT5 #{t_id}: {synced}")
+    assert synced is not None
+    assert synced["commission"] == 0.70  # 0.10 lot * $7.0/lot = $0.70
+
+    MT5Connector.disconnect()
+    print("\n🎉 TẤT CẢ 8 BÀI TEST HỆ THỐNG VÍ THỰC ĐÃ VƯỢT QUA 100% HOÀN HẢO!")
+
+
+def test_smart_exit_breakeven_trailing_and_capital_stop_out():
+    print("\n" + "=" * 50)
+    print("TEST 9: CHỐNG CHÁY VÍ & ĐÓNG LỆNH THÔNG MINH (BREAK-EVEN, TRAILING SL, AI EARLY EXIT & CAPITAL STOP-OUT)")
+    print("=" * 50)
+
+    MT5Connector.connect()
+    rm = RiskManager()
+
+    # 1. Test Break-Even Lock (>= 50% TP distance -> dời SL về Entry + 1.0 pip)
+    entry = 1.10000
+    sl = 1.09800
+    tp = 1.10400  # 40 pips TP
+    # Giá tăng lên 1.10220 (đạt 22/40 = 55% quãng đường TP)
+    mod_be, new_sl_be, reason_be = rm.evaluate_trailing_and_breakeven(
+        order_type="BUY",
+        open_price=entry,
+        current_eval_price=1.10220,
+        current_sl=sl,
+        tp_price=tp,
+        pip_size=0.0001,
+        digits=5,
+    )
+    print(f"-> Break-Even Check (55% TP): Modify={mod_be} | New SL={new_sl_be} | {reason_be}")
+    assert mod_be is True
+    assert new_sl_be == 1.10010  # Hòa vốn + 1.0 pip bù phí sàn
+
+    # 2. Test Trailing Stop (>= 75% TP distance -> khóa cứng 55% lợi nhuận đang có)
+    # Giá tăng tiếp lên 1.10320 (đạt 32/40 = 80% quãng đường TP)
+    mod_tr, new_sl_tr, reason_tr = rm.evaluate_trailing_and_breakeven(
+        order_type="BUY",
+        open_price=entry,
+        current_eval_price=1.10320,
+        current_sl=new_sl_be,
+        tp_price=tp,
+        pip_size=0.0001,
+        digits=5,
+    )
+    print(f"-> Trailing Stop Check (80% TP): Modify={mod_tr} | New SL={new_sl_tr} | {reason_tr}")
+    assert mod_tr is True
+    assert new_sl_tr > new_sl_be
+
+    # 3. Test modify_position_sl_tp trên MT5Executor
+    t_mod = MT5Executor.open_position("EURUSD", "BUY", 0.10, sl, tp)
+    assert t_mod is not None
+    mod_ok = MT5Executor.modify_position_sl_tp(t_mod, "EURUSD", new_sl_tr, tp)
+    print(f"-> MT5Executor.modify_position_sl_tp #{t_mod}: Thành công={mod_ok}")
+    assert mod_ok is True
+    MT5Executor.close_position_by_ticket(t_mod)
+
+    # 4. Test AI Reversal Early Exit
+    early_ok, early_msg = rm.should_early_exit_position(
+        order_type="BUY",
+        profit=-1.5,
+        one_r_money=1.0,
+        recommended_action="SELL",
+        confidence=82.0,
+        market_case="CASE_A_TREND",
+        hmm_safe=True,
+    )
+    print(f"-> AI Early Exit khi đảo chiều SELL 82%: Exit={early_ok} | {early_msg}")
+    assert early_ok is True
+
+    # 5. Test Hard Capital Stop-Out Protection (Vốn đánh $100 USD -> Sàn bảo vệ $20 USD)
+    stop_ok, floor_val, stop_msg = rm.is_capital_stop_out_reached(bot_equity=18.50, initial_capital=100.0)
+    print(f"-> Hard Capital Stop-Out (Equity $18.50 / Vốn $100): Trigger={stop_ok} | Floor=${floor_val} | {stop_msg}")
+    assert stop_ok is True
+    assert floor_val == 20.0
+
+    MT5Connector.disconnect()
+    print("\n🎉 TẤT CẢ 9 BÀI TEST (BAO GỒM 3 CƠ CHẾ CHỐNG CHÁY VÍ & ĐÓNG LỆNH THÔNG MINH) ĐÃ VƯỢT QUA 100%!")
+
+
 if __name__ == "__main__":
     test_price_action_and_market_cases()
     test_ml_dl_math_formulas()
@@ -302,3 +448,5 @@ if __name__ == "__main__":
     test_full_trade_execution()
     test_v2_custom_lot_and_target_circuit_breaker()
     test_spread_filter_commission_and_lot_1r()
+    test_real_wallet_swap_slippage_margin_and_sync()
+    test_smart_exit_breakeven_trailing_and_capital_stop_out()

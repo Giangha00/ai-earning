@@ -63,6 +63,12 @@ function initWebSocket() {
           loadOrdersSidebar();
           loadSignals();
           loadAccountData();
+        } else if (msg.type === "ORDER_CLOSED") {
+          const p = Number(msg.data.profit || 0);
+          showToast(`💰 Đã chốt lệnh #${msg.data.ticket_id} (${msg.data.reason}): ${p >= 0 ? '+' : ''}$${p.toFixed(2)} USD`);
+          loadOrdersSidebar();
+          loadLogs();
+          loadAccountData();
         } else if (msg.type === "TARGET_GOAL_REACHED") {
           showToast(msg.data.message || "🎯 CẦU DAO CHỐT LỜI TỔNG KÍCH HOẠT: Đã đóng hết lệnh & dừng Bot!");
           loadOrdersSidebar();
@@ -99,15 +105,22 @@ function initWebSocket() {
 function handleRealtimeTick(data) {
   if (!data) return;
 
+  // Bỏ qua gói tin của symbol cũ nếu vừa chuyển sàn
+  if (data.symbol && data.symbol !== currentSymbol) {
+    return;
+  }
+
+  const digits = (data.digits !== undefined && data.digits !== null) ? Number(data.digits) : getSymbolDigits();
+
   // 1. Cập nhật giá trên header với chỉ báo đổi màu động
   latestMarketPrice = data.last_price || data.ask;
   const headerLiveTick = document.getElementById("header-live-tick");
-  if (headerLiveTick) {
+  if (headerLiveTick && latestMarketPrice !== undefined) {
     const prevText = headerLiveTick.innerText;
     const prevPrice = parseFloat(prevText.split(":")[1]) || latestMarketPrice;
     const isUp = latestMarketPrice >= prevPrice;
     headerLiveTick.style.color = isUp ? "#10b981" : "#f43f5e";
-    headerLiveTick.innerText = `${data.symbol}: ${latestMarketPrice.toFixed(5)}`;
+    headerLiveTick.innerText = `${data.symbol}: ${Number(latestMarketPrice).toFixed(digits)}`;
   }
 
   // 2. Cập nhật nến biểu đồ thời gian thực (Real-time Candlestick & Volume & Legend)
@@ -148,19 +161,19 @@ function handleRealtimeTick(data) {
     const elTime = document.getElementById("legend-time");
     if (elTime) elTime.innerText = dateStr;
     const elOpen = document.getElementById("legend-open");
-    if (elOpen) elOpen.innerText = data.last_candle.open.toFixed(5);
+    if (elOpen) elOpen.innerText = Number(data.last_candle.open).toFixed(digits);
     const elHigh = document.getElementById("legend-high");
-    if (elHigh) elHigh.innerText = data.last_candle.high.toFixed(5);
+    if (elHigh) elHigh.innerText = Number(data.last_candle.high).toFixed(digits);
     const elLow = document.getElementById("legend-low");
-    if (elLow) elLow.innerText = data.last_candle.low.toFixed(5);
+    if (elLow) elLow.innerText = Number(data.last_candle.low).toFixed(digits);
     const elClose = document.getElementById("legend-close");
-    if (elClose) elClose.innerText = data.last_candle.close.toFixed(5);
+    if (elClose) elClose.innerText = Number(data.last_candle.close).toFixed(digits);
     const elVol = document.getElementById("legend-vol");
     if (elVol) elVol.innerText = (data.last_candle.volume || 1).toLocaleString();
 
     const elChange = document.getElementById("legend-change");
     if (elChange) {
-      elChange.innerText = `${isPos ? "+" : ""}${change.toFixed(5)} (${isPos ? "+" : ""}${pct.toFixed(2)}%)`;
+      elChange.innerText = `${isPos ? "+" : ""}${change.toFixed(digits)} (${isPos ? "+" : ""}${pct.toFixed(2)}%)`;
       elChange.style.color = isPos ? "#10b981" : "#f43f5e";
     }
   }
@@ -249,6 +262,7 @@ function handleRealtimeTick(data) {
     const flUsd = Number(data.floating_pnl || 0);
     const balVnd = Math.round(balUsd * usdToVndRate);
     const eqVnd = Number(data.equity_vnd || Math.round(eqUsd * usdToVndRate));
+    currentAccountUsd = balUsd;
 
     const wBalUsd = document.getElementById("wallet-balance-usd");
     if (wBalUsd) wBalUsd.innerText = `$${balUsd.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
@@ -264,6 +278,24 @@ function handleRealtimeTick(data) {
 
     const wBalVnd = document.getElementById("wallet-balance-vnd");
     if (wBalVnd) wBalVnd.innerText = `~${balVnd.toLocaleString("vi-VN")} ₫`;
+
+    if (data.leverage) {
+      const levEl = document.getElementById("wallet-leverage");
+      if (levEl) levEl.innerText = `1:${data.leverage}`;
+    }
+
+    if (data.win_rate !== undefined) {
+      const wrEl = document.getElementById("wallet-winrate");
+      if (wrEl) wrEl.innerText = `${Number(data.win_rate).toFixed(1)}%`;
+    }
+    if (data.total_profit !== undefined) {
+      const realizedUsd = Number(data.total_profit);
+      const realizedEl = document.getElementById("wallet-realized-usd");
+      if (realizedEl) {
+        realizedEl.innerText = `${realizedUsd >= 0 ? "+" : ""}$${realizedUsd.toFixed(2)}`;
+        realizedEl.style.color = realizedUsd >= 0 ? "var(--color-gold)" : "var(--color-red)";
+      }
+    }
 
     const botEqUsd = Number(data.bot_equity !== undefined ? data.bot_equity : (data.initial_capital || 100));
     updateBotTargetStatusUI(botEqUsd, data.target_goal, data.bot_running, data.custom_lot);
@@ -406,6 +438,7 @@ function initCharts() {
 }
 
 function displayCandleLegend(candle, volume, timestamp) {
+  const digits = getSymbolDigits();
   const dateStr = new Date(timestamp * 1000).toLocaleString("vi-VN", {
     month: "2-digit",
     day: "2-digit",
@@ -418,13 +451,13 @@ function displayCandleLegend(candle, volume, timestamp) {
   const isPos = change >= 0;
 
   document.getElementById("legend-time").innerText = dateStr;
-  document.getElementById("legend-open").innerText = candle.open.toFixed(5);
-  document.getElementById("legend-high").innerText = candle.high.toFixed(5);
-  document.getElementById("legend-low").innerText = candle.low.toFixed(5);
-  document.getElementById("legend-close").innerText = candle.close.toFixed(5);
+  document.getElementById("legend-open").innerText = Number(candle.open).toFixed(digits);
+  document.getElementById("legend-high").innerText = Number(candle.high).toFixed(digits);
+  document.getElementById("legend-low").innerText = Number(candle.low).toFixed(digits);
+  document.getElementById("legend-close").innerText = Number(candle.close).toFixed(digits);
 
   const changeEl = document.getElementById("legend-change");
-  changeEl.innerText = `${isPos ? "+" : ""}${change.toFixed(5)} (${isPos ? "+" : ""}${pct.toFixed(2)}%)`;
+  changeEl.innerText = `${isPos ? "+" : ""}${change.toFixed(digits)} (${isPos ? "+" : ""}${pct.toFixed(2)}%)`;
   changeEl.style.color = isPos ? "#10b981" : "#f43f5e";
 
   document.getElementById("legend-vol").innerText = Number(volume).toLocaleString();
@@ -540,6 +573,13 @@ async function loadCandleData() {
 
     if (!data.candles || data.candles.length === 0) return;
 
+    const digits = (data.digits !== undefined && data.digits !== null) ? Number(data.digits) : getSymbolDigits();
+    const minMove = Number(Math.pow(10, -digits).toFixed(digits));
+    const priceFormat = { type: "price", precision: digits, minMove: minMove };
+    if (candleSeries) candleSeries.applyOptions({ priceFormat });
+    if (sma20Series) sma20Series.applyOptions({ priceFormat });
+    if (sma50Series) sma50Series.applyOptions({ priceFormat });
+
     lastCandleData = data.candles;
     candleSeries.setData(data.candles);
     volumeSeries.setData(data.volume);
@@ -567,10 +607,11 @@ async function loadCandleData() {
       entryInput.value = latestMarketPrice.toFixed(digits);
       const targetInput = document.getElementById("input-target-price");
       if (targetInput && !targetInput.dataset.modified) {
-        // Mặc định tính theo mức lời +$50 USD nếu chưa nhập
+        // Mặc định tính theo mức lời ròng +$50 USD (đã cộng bù phí hoa hồng $7/lot) nếu chưa nhập
         const defaultLot = parseFloat(document.getElementById("input-lot-size").value) || 0.1;
         const mult = getSymbolContractMultiplier();
-        const diffPrice = 50.0 / (defaultLot * mult);
+        const commUsd = defaultLot * 7.0;
+        const diffPrice = (50.0 + commUsd) / (defaultLot * mult);
         targetInput.value = (latestMarketPrice + diffPrice).toFixed(digits);
       }
       recalcEstimatedProfit();
@@ -613,7 +654,8 @@ function getSymbolPipSize() {
 function getSymbolContractMultiplier() {
   const isGold = currentSymbol.includes("XAU") || currentSymbol.includes("GOLD");
   const isCrypto = currentSymbol.includes("BTC") || currentSymbol.includes("ETH");
-  if (isGold || isCrypto) return 100.0;
+  if (isCrypto) return 1.0;
+  if (isGold) return 100.0;
   return 100000.0;
 }
 
@@ -830,9 +872,9 @@ function applyProfitGoal(desiredProfitUsd) {
   const mult = getSymbolContractMultiplier();
   const digits = getSymbolDigits();
 
-  // Công thức: Profit USD = (Diff Price) * Multiplier * Lot
-  // Diff Price = Profit USD / (Multiplier * Lot)
-  const diffPrice = desiredProfitUsd / (mult * lot);
+  // Công thức chuẩn: Cộng bù phí Commission Round-Turn ($7.0/lot) vào TP để Lãi ròng thực nhận đúng bằng desiredProfitUsd
+  const commBufferUsd = lot * 7.0;
+  const diffPrice = (desiredProfitUsd + commBufferUsd) / (mult * lot);
   targetInput.value = (entryPrice + diffPrice).toFixed(digits);
   targetInput.dataset.modified = "true";
   recalcEstimatedProfit();
@@ -879,11 +921,13 @@ function recalcEstimatedProfit() {
 
   const diffPrice = Math.abs(targetPrice - entryPrice);
   const pips = diffPrice / pipSize;
-  const profitUsd = diffPrice * mult * lot;
+  const grossProfitUsd = diffPrice * mult * lot;
+  const commUsd = lot * 7.0;
+  const profitUsd = Math.max(0.0, grossProfitUsd - commUsd);
   const profitVnd = profitUsd * usdToVndRate;
 
   if (subTargetInfo) {
-    subTargetInfo.innerText = `+${pips.toFixed(1)} pips (+$${profitUsd.toFixed(2)})`;
+    subTargetInfo.innerText = `+${pips.toFixed(1)} pips (Lãi ròng +$${profitUsd.toFixed(2)}, đã trừ phí $${commUsd.toFixed(2)})`;
   }
 
   const distEl = document.getElementById("calc-pips-dist");
@@ -951,6 +995,13 @@ function initControls() {
       btn.classList.add("active");
       currentTimeframe = btn.dataset.tf;
       document.getElementById("active-tf").innerText = currentTimeframe;
+      if (liveSocket && liveSocket.readyState === WebSocket.OPEN) {
+        liveSocket.send(JSON.stringify({
+          type: "SWITCH_SYMBOL",
+          symbol: currentSymbol,
+          timeframe: currentTimeframe
+        }));
+      }
       loadCandleData();
     });
   });
@@ -1295,6 +1346,14 @@ function selectMarket(symbol) {
   const modal = document.getElementById("markets-modal");
   if (modal) modal.classList.add("hidden");
 
+  if (liveSocket && liveSocket.readyState === WebSocket.OPEN) {
+    liveSocket.send(JSON.stringify({
+      type: "SWITCH_SYMBOL",
+      symbol: currentSymbol,
+      timeframe: currentTimeframe
+    }));
+  }
+
   showToast(`⚡ Đã chuyển sang thị trường: ${symbol}`);
   loadCandleData();
   filterAndRenderMarkets();
@@ -1463,7 +1522,9 @@ async function startBot() {
       body: JSON.stringify({
         initial_capital: initial_capital,
         custom_lot: custom_lot,
-        target_goal: target_goal
+        target_goal: target_goal,
+        symbol: currentSymbol,
+        timeframe: currentTimeframe
       })
     });
     const data = await res.json();
